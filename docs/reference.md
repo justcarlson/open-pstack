@@ -2,13 +2,13 @@
 
 This page contains the full skill, dependency, runtime, and porting reference. For the plain-English introduction and quick start, see the [main README](../README.md).
 
-[Poteto](https://x.com/poteto)'s [pstack](https://github.com/cursor/plugins/tree/main/pstack), adapted to run in Claude Code and Codex without Cursor. One shared skill tree serves both harnesses; Grok remains available as a model-provider lane. Version 1.2.0 is synced to Cursor pstack v0.14.3 at `bdf7aa355337897f167153e05069aca505dae17c`. See [UPSTREAM.md](../UPSTREAM.md) for the exact sync contract.
+[Poteto](https://x.com/poteto)'s [pstack](https://github.com/cursor/plugins/tree/main/pstack), adapted to run in Claude Code, Codex, and OMP without Cursor. One shared skill tree serves all three parent harnesses; Grok remains available as a model lane. Version 1.3.0 is synced to Cursor pstack v0.14.3 at `bdf7aa355337897f167153e05069aca505dae17c`. See [UPSTREAM.md](../UPSTREAM.md) for the exact sync contract.
 
 Original by Lauren Tan. This distribution builds on Michael Denyer's [pstack-claude](https://github.com/michael-denyer/pstack-claude) port and retains its history and MIT attribution. It imports seven MIT-licensed skills from [cursor-team-kit](https://github.com/cursor/plugins/tree/main/cursor-team-kit): `deslop`, `thermo-nuclear-code-quality-review`, `make-pr-easy-to-review`, `fix-ci`, `fix-merge-conflicts`, `get-pr-comments`, `what-did-i-get-done`.
 
 > if you want to go fast, go deep first. pstack helps you write less, but higher quality code. rigorous agent workflows you can parallelize with confidence.
 
-This is not a verbatim copy. Skill bodies have been edited so every Cursor-specific primitive resolves to its Claude Code or Codex equivalent — see [Differences from upstream](#differences-from-upstream) for the full list. The exhaustive per-skill audit lives in [CHANGES.md](../CHANGES.md); license attribution lives in [NOTICE.md](../NOTICE.md); the upstream README is preserved verbatim at [README-UPSTREAM.md](../README-UPSTREAM.md).
+This is not a verbatim copy. Skill bodies have been edited so every Cursor-specific primitive resolves to its Claude Code, Codex, or OMP equivalent. See [Differences from upstream](#differences-from-upstream) for the full list.
 
 ## Install
 
@@ -59,7 +59,7 @@ The marketplace install is the normal user path. Direct links are only for testi
 ├── plugins/pstack/                   # the plugin itself
 │   ├── .claude-plugin/plugin.json    # Claude Code manifest
 │   ├── .codex-plugin/plugin.json     # Codex manifest (skills: ./skills/)
-│   ├── skills/                       # 52 skills shared by Claude Code and Codex
+│   ├── skills/                       # 52 skills shared by Claude Code, Codex, and OMP
 │   │   ├── poteto-mode/references/{codex-tools,provider-dispatch}.md  # tool + provider routing
 │   │   └── poteto-mode/scripts/      # bun/bash/node tooling: watch-pr, orch, runner, check-plan.mjs, worktree-audit.sh
 │   ├── hooks/                        # SessionStart auto-fire: injects the poteto-mode mandate (Claude Code only)
@@ -83,12 +83,22 @@ The Codex build shares one `skills/` tree with the Claude Code build. Nothing is
 
 - **Skill invocation.** Codex loads `SKILL.md` natively. There is no `Skill` tool. You invoke a skill by name (ask for it, or pick `pstack:poteto-mode` from the list).
 - **Package surface.** The native `skills/` tree is the only workflow source. The plugin ships no `commands/` layer and does not link prompts into `~/.codex/prompts/`. Codex would migrate such files into duplicate source-command skills while loading the native skill tree. The 21 `principle-*` leaves declare `user-invocable: false`. Claude keeps them out of its user picker; Codex 0.149.0 currently shows them despite that metadata ([#8](https://github.com/ericlitman/open-pstack/issues/8)).
-- **Tool and built-in mapping.** Claude tool names and built-in skills resolve through [`codex-tools.md`](../plugins/pstack/skills/poteto-mode/references/codex-tools.md). Model execution resolves separately through [`provider-dispatch.md`](../plugins/pstack/skills/poteto-mode/references/provider-dispatch.md), so Codex can keep Sol native while invoking Claude and Grok externally.
-- **Subagents.** The `Agent` tool maps to Codex `spawn_agent` / `wait_agent`, enabled by `multi_agent = true`. Parallel fan-out is multiple `spawn_agent` calls in one turn. If the native Codex lane is unavailable, record that lane as a dropout; external Claude and Grok lanes still run, and no provider is silently substituted. There is no `poteto-agent` subagent type on Codex; route ad-hoc subagents by dispatching a `spawn_agent` told to read `poteto-mode` first.
-- **Auto-fire.** The `hooks/` SessionStart injection is Claude Code-only; Codex has no plugin hook runtime. Enter `pstack:poteto-mode` by name, or add a standing instruction to `~/.codex/AGENTS.md` if you want the same always-on routing.
-- **Models.** `/setup-pstack` writes provider-qualified descriptors and asks one requested effort per frontier family (`low`, `medium`, `high`, `xhigh`, `max`). The first-run panel is Fable 5 max, GPT-5.6 Sol max, Grok 4.6 xhigh, and Opus 5 xhigh. A rerun keeps each role's family and rewrites that family's effort. In Codex, Sol uses native `spawn_agent`; Claude and Grok use the deterministic external runner. In Claude Code, Fable and Opus use native agents; Sol and Grok use the runner. Children never detect the parent or reroute themselves.
+- **Tool and built-in mapping.** Claude tool names and built-in skills resolve through [`codex-tools.md`](../plugins/pstack/skills/poteto-mode/references/codex-tools.md). Model execution resolves through [`provider-dispatch.md`](../plugins/pstack/skills/poteto-mode/references/provider-dispatch.md).
+- **Subagents.** The `Agent` tool maps to Codex `spawn_agent` and `wait_agent`, enabled by `multi_agent = true`. Use native `spawn_agent` only when the current parent can pin the requested API provider, model, and effort. Use the external runner for every other target, including a Codex-backed custom provider. If a lane fails, record a dropout. Never substitute another provider.
+- **Auto-fire.** The `hooks/` SessionStart injection is Claude Code-only. Enter `pstack:poteto-mode` by name on Codex, or add a standing instruction to `~/.codex/AGENTS.md`.
+- **Models and API providers.** `/setup-pstack` writes `<harness>[<api-provider>]:<model>@<effort>` routes. The four upstream models remain first-run defaults. The operator can change any role to another harness-compatible model. Codex routes can select a trusted user-level `model_providers` entry such as OpenRouter. Pstack stores only the provider ID.
 
 Verified in fresh installed Claude Code and Codex sessions: the user-facing skills are discovered and namespaced under `pstack`; both parents fan out the frontier quad through the documented native/external route table, retain long-running handles without a default timeout, and cross-judge only after every candidate is terminal. The `principle-*` leaves remain available for `poteto-mode` to read by path. Claude honors their `user-invocable: false` metadata; Codex 0.149.0 does not ([#8](https://github.com/ericlitman/open-pstack/issues/8)).
+
+## Running on OMP
+
+OMP discovers the user-scoped Claude marketplace installation and uses the same `skills/` and `agents/` tree. Ask for a skill by its short or namespaced name.
+
+`setup-pstack` stores OMP's role map at `~/.omp/agent/pstack-models.md` and copies it into one bounded block in `~/.omp/agent/AGENTS.md`. `inherit-parent` and `auto` use OMP's native task tool. Every explicit `omp[...]` route uses the external runner because OMP task items do not accept a per-call model override.
+
+The OMP adapter runs one headless `omp -p --mode json` process with an exact `provider/model` and thinking level. It preserves project rules, restricts tools by access mode, and disables model fallback, context promotion, automatic compaction, prewalk, skills, and extensions. The schema-3 receipt accepts the lane only when OMP reports the requested provider and model.
+
+For example, `omp[openrouter]:z-ai/glm-5.3-flash@high` runs GLM 5.3 Flash through OMP's existing OpenRouter credentials and model catalog.
 
 ## Dependencies
 
@@ -109,7 +119,7 @@ Not declared as deps, but referenced in skill bodies:
 - **`gh` CLI** — system-level requirement of the `babysit` skill and the Babysit / Shipping playbooks. Install via [`brew install gh`](https://cli.github.com) and authenticate with `gh auth login`.
 - **`bun`** — runs the vendored `skills/poteto-mode/scripts/` tooling (`watch-pr`, `orch`, `runner`). Install via [`brew install oven-sh/bun/bun`](https://bun.sh). `bootstrap.ts` installs dependencies for `watch-pr` and `orch`; the runner uses only Bun and Node built-ins, so it launches directly without an install/re-exec layer.
 - **`node`** — runs `skills/poteto-mode/scripts/check-plan.mjs`. The checker uses only Node built-ins and does not need Bun.
-- **Claude Code, Codex, and Grok Build CLIs** — the external runner uses the assigned subscribed CLI directly. Install and authenticate only the providers present in your model sheet. Same-provider work stays native; the runner refuses it.
+- **Claude Code, Codex, Grok Build, and OMP CLIs** — the external runner uses the selected CLI directly. Install each harness used by the model sheet. Configure custom API providers in that harness's trusted user configuration. A same-harness route can run externally when the native primitive cannot pin its exact target.
 - **`gt` (Graphite CLI)** — only for the stack playbooks (Shipping, Orchestrate, the autopilots). Everything else works without it.
 - **`jq` and `rg` (ripgrep)** — only for `scripts/worktree-audit.sh` (the Worktree cleanup playbook). Without them the audit still runs but blanks its PR and LAST_CHAT columns, so it warns on stderr rather than returning a table that looks complete.
 
@@ -117,7 +127,7 @@ No third-party plugins. The harsher-critique escape hatch lives in the bundled `
 
 ## Skills
 
-The table uses the short upstream names. Claude Code exposes each native skill with a `/pstack:` prefix, such as `/pstack:poteto-mode`. In Codex, ask for the namespaced skill, such as `pstack:poteto-mode`.
+The table uses the short upstream names. Claude Code exposes each native skill with a `/pstack:` prefix. In Codex or OMP, ask for the skill by name.
 
 | skill | use it when |
 | --- | --- |
@@ -159,7 +169,7 @@ The table uses the short upstream names. Claude Code exposes each native skill w
 
 `comment-sicko` is the read-only comment reviewer the `no-comments` skill spawns. Upstream names it `Comment Sicko`; the port renames it to `comment-sicko` so the name is a valid `subagent_type`. Invoke it through `/no-comments`, not directly.
 
-Fable and Opus each ship at `low`, `medium`, `high`, `xhigh`, and `max`. Names are `pstack-<stem>-<effort>`. `pstack-fable-max` and `pstack-opus-xhigh` remain. Each file pins model and effort, runs in the background, and denies nested Agent/Task dispatch. pstack dispatches them from provider-qualified descriptors; they are not user-facing workflows.
+Fable and Opus each ship at `low`, `medium`, `high`, `xhigh`, and `max`. Names are `pstack-<stem>-<effort>`. `pstack-fable-max` and `pstack-opus-xhigh` remain. Each file pins model and effort, runs in the background, and denies nested Agent/Task dispatch. pstack dispatches them from harness-and-provider route descriptors; they are not user-facing workflows.
 
 ## Differences from upstream
 
@@ -194,11 +204,11 @@ The port is editorial, not mechanical. Anywhere upstream pstack assumed Cursor-s
 | Cursor's `/goal` (standing objective across turns) | The program objective written into the run's standing orders and restated in the todolist |
 | The Cursor agent store (path in the system prompt) | `~/.claude/orchestrate/<project-slug>/`, which survives the session restarts a multi-day program expects |
 | Model rule `~/.cursor/rules/pstack-models.mdc` | Override sheet `~/.claude/pstack-models.md`, included from `CLAUDE.md` |
-| Multi-model panels (arena, architect, interrogate, how-critics) | Provider dispatch restores the upstream frontier quad: `claude:claude-fable-5@max`, `codex:gpt-5.6-sol@max`, `grok:grok-4.6@xhigh`, `claude:claude-opus-5@xhigh`. Same-provider lanes stay native; external lanes use the bundled runner. |
+| Multi-model panels (arena, architect, interrogate, how-critics) | The first-run sheet uses `claude[anthropic]:claude-fable-5@max`, `codex[openai]:gpt-5.6-sol@max`, `grok[xai]:grok-4.6@xhigh`, and `claude[anthropic]:claude-opus-5@xhigh`. These routes are defaults, not an allowlist. |
 
-### Cross-vendor dispatch
+### Cross-provider dispatch
 
-The earlier port collapsed panels to Claude-only models. The bundled runner restores upstream's cross-provider judgment signal without adding a daemon or model-router service. Claude Code shells out to Codex and Grok; Codex shells out to Claude and Grok. The top-level parent chooses every route and each external process receives a complete task directly, so there is no supervising model invocation and no child-side harness detection.
+The bundled runner restores cross-provider judgment without a daemon or model-router service. A route names an execution harness, API provider, model, and effort. The top-level parent chooses native or external execution once. Codex selects custom providers per lane through `model_provider`. OMP selects any available concrete `provider/model` through its headless CLI and proves the reported provider and model in the receipt. Credentials remain in the selected harness.
 
 ### What's deliberately kept
 

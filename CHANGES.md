@@ -2,6 +2,14 @@
 
 This port applies the Cursor → Claude Code substitutions in skill bodies. Earlier drafts left them flagged; this revision resolves them. A later pass added a Codex build that shares the same skills; see [Codex port](#codex-port) below.
 
+## 1.3.0 makes routes configurable and adds OMP
+
+Pstack routes now separate the execution harness, API provider, model, and effort. The model sheet accepts any harness-compatible model instead of restricting every role to the four default families. Codex and OMP routes can select trusted providers per lane. For example, `omp[openrouter]:z-ai/glm-5.3-flash@high` runs GLM 5.3 Flash through OMP without storing the OpenRouter endpoint or key in pstack.
+
+The external runner now accepts `--parent-harness`, `--harness`, and `--api-provider`. Schema-3 receipts store the exact target and the provider and model reported by OMP. Same-harness external runs are allowed when a native child cannot pin the requested target. The OMP adapter preserves repository rules, restricts tools by access mode, and ships a static overlay that disables OMP model fallback, context promotion, automatic compaction, and Anthropic server-side fallback. The runner still has no implicit timeout and never substitutes a route.
+
+`setup-pstack` now supports Claude Code, Codex, and OMP parents. It migrates old descriptors in memory, probes each distinct final target, and writes only after every probe passes and the operator confirms the full map. The four upstream models remain first-run defaults rather than an allowlist.
+
 ## 1.2.0 adds verified multi-PR plans, earlier runtime diagnostics, and shared review-bot triage
 
 Plans with several stages now use one checklist instead of an overview and separate files for each stage. It has one ordered section for every pull request and keeps all ten ways of testing the real product, unit tests, live and performance proof, checks for how changes work together, merge rules, and supporting details in one place. A Node-based checker with no extra dependencies rejects missing or out-of-order sections, fake screenshots, empty definitions of success, incomplete performance proof, incorrectly written review checks, unsupported punctuation, and incorrect command use. Claude Code and Codex use the same installed skill and checker through their existing parent-controlled setup. If a provider fails, it is identified by name and treated as a dropout. No backup provider or hidden time limit was added.

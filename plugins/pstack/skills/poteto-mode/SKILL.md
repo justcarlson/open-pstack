@@ -7,7 +7,7 @@ description: poteto's agent style for concise, detailed responses, deliberate su
 
 ## Platform Adaptation
 
-These skills share one tree across Claude Code and Codex. Read [`references/provider-dispatch.md`](references/provider-dispatch.md) whenever a configured role launches. It defines the provider-qualified model descriptors, native/external route table, launcher, isolation, receipts, and dropout policy. Children never choose routes. When a skill names a Claude tool or built-in skill (`run`, `verify`, `plugin-dev:skill-development`), read [`references/codex-tools.md`](references/codex-tools.md) for the Codex equivalent.
+These skills share one tree across Claude Code, Codex, and OMP. Read [`references/provider-dispatch.md`](references/provider-dispatch.md) whenever a configured role launches. It defines route descriptors, native and external execution, isolation, receipts, and dropout policy. Children never choose routes. When a skill names a Claude tool or built-in skill, read [`references/codex-tools.md`](references/codex-tools.md) on Codex. On OMP, use the native `read`, `edit`, `bash`, `grep`, `glob`, `task`, `todo`, `ask`, and `browser` tools.
 
 ## Non-negotiables
 
@@ -85,9 +85,9 @@ Read the leaf skill in full for any principle you apply. Each entry names when i
 
 ## Subagents
 
-For `inherit-parent`, `auto`, or an unconfigured native ad-hoc helper, prefer `poteto-agent`. `/poteto-mode` and `poteto-agent` route through the same wrapper. A provider-qualified role instead follows provider dispatch: Claude's shipped frontier agent definitions pin native model and effort, Codex passes both to `spawn_agent`, and external providers run through the deterministic launcher. Routed workflow skills set the task and access mode; do not override their choices.
+For `inherit-parent`, `auto`, or an unconfigured native helper, prefer `poteto-agent`. `/poteto-mode` and `poteto-agent` use the same wrapper. A configured route follows provider dispatch. Use a native primitive only when it can pin the exact API provider, model, and effort. Every explicit OMP route uses the external launcher because OMP task items cannot select an arbitrary model per call. Routed workflow skills set the task and access mode; do not override those choices.
 
-**Defaults for every delegation.** Start independent lanes together, use file pointers rather than inlined dumps, preserve only the tools or MCPs the task needs, and assign every writer a worktree or unique output directory. `/setup-pstack` configures the descriptor per role. Upstream defaults use Grok 4.6 xhigh for feature/refactoring, exploration, and swarm work; GPT-5.6 Sol max for bug fixes, performance work, hillclimbing, and tooling review; Fable 5 max for judgment, prose, explanation, synthesis, and hardest tasks; and the four-provider frontier panel for model-diverse judgment. The panel defaults are enumerated in `arena`, `architect`, `interrogate`, and `how`. `inherit-parent` and `auto` use the parent model natively and reduce provider diversity when used in a panel.
+**Defaults for every delegation.** Start independent lanes together, use file pointers instead of inlined dumps, preserve only the tools or MCPs the task needs, and assign every writer a worktree or unique output directory. `/setup-pstack` configures each role's route. Upstream defaults use Grok 4.6 xhigh for feature and refactoring work, exploration, and swarm work. They use GPT-5.6 Sol max for bug fixes, performance work, hillclimbing, and tooling review. They use Fable 5 max for judgment, prose, explanation, synthesis, and the hardest tasks. The four-model judgment panel is listed in `arena`, `architect`, `interrogate`, and `how`. `inherit-parent` and `auto` use the parent model natively and reduce provider diversity in a panel.
 
 You own every subagent's work. Review the diff and write your own summary, don't pass through what it said. Interrupt-chained resumes silently drop directives, so fire a fresh subagent with consolidated scope rather than trusting a "done" summary. A second opinion is the same prompt against a different model. Agreement is high-signal.
 

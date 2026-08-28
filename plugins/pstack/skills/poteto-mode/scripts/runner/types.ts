@@ -1,18 +1,42 @@
-export const PARENTS = ["claude", "codex"] as const;
-export const PROVIDERS = ["claude", "codex", "grok"] as const;
+export const PARENT_HARNESSES = ["claude", "codex", "omp"] as const;
+export const EXECUTION_HARNESSES = ["claude", "codex", "grok", "omp"] as const;
 export const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 export const ACCESS_MODES = ["read-only", "isolated-write"] as const;
 
-export type Parent = (typeof PARENTS)[number];
-export type Provider = (typeof PROVIDERS)[number];
+export type ParentHarness = (typeof PARENT_HARNESSES)[number];
+export type ExecutionHarness = (typeof EXECUTION_HARNESSES)[number];
 export type Effort = (typeof EFFORTS)[number];
 export type AccessMode = (typeof ACCESS_MODES)[number];
 
+export type LaneTarget =
+  | {
+      readonly harness: "claude";
+      readonly apiProvider: "anthropic";
+      readonly model: string;
+      readonly effort: Effort;
+    }
+  | {
+      readonly harness: "codex";
+      readonly apiProvider: string;
+      readonly model: string;
+      readonly effort: Effort;
+    }
+  | {
+      readonly harness: "omp";
+      readonly apiProvider: string;
+      readonly model: string;
+      readonly effort: Effort;
+    }
+  | {
+      readonly harness: "grok";
+      readonly apiProvider: "xai";
+      readonly model: string;
+      readonly effort: Effort;
+    };
+
 export interface RunnerOptions {
-  readonly parent: Parent;
-  readonly provider: Provider;
-  readonly model: string;
-  readonly effort: Effort;
+  readonly parentHarness: ParentHarness;
+  readonly target: LaneTarget;
   readonly mode: AccessMode;
   readonly promptPath: string;
   readonly cwd: string;
@@ -42,6 +66,7 @@ export interface NormalizedUsage {
 
 export interface ParsedOutput {
   readonly text: string;
+  readonly reportedApiProvider: string | null;
   readonly reportedModel: string | null;
   readonly sessionId: string | null;
   readonly usage: NormalizedUsage | null;
@@ -49,12 +74,10 @@ export interface ParsedOutput {
 }
 
 export interface RunnerReceipt {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 3;
   readonly status: ReceiptStatus;
-  readonly parent: Parent;
-  readonly provider: Provider;
-  readonly model: string;
-  readonly effort: Effort;
+  readonly parentHarness: ParentHarness;
+  readonly target: LaneTarget;
   readonly mode: AccessMode;
   readonly cwd: string;
   readonly promptPath: string;
@@ -71,9 +94,15 @@ export interface RunnerReceipt {
   readonly argv: readonly string[];
   readonly exitCode: number | null;
   readonly signal: string | null;
+  readonly reportedApiProvider: string | null;
   readonly reportedModel: string | null;
   readonly modelVerified: boolean;
   readonly modelEvidence: "provider-report" | "pinned-argv" | null;
+  readonly apiProviderEvidence:
+    | "adapter-fixed"
+    | "pinned-argv"
+    | "provider-report"
+    | null;
   readonly sessionId: string | null;
   readonly usage: NormalizedUsage | null;
   readonly costUsd: number | null;

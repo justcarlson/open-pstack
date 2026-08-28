@@ -1,52 +1,70 @@
 # Provider dispatch
 
-pstack model choices are provider-qualified descriptors:
+A pstack route separates the execution harness from the API provider:
 
 ```text
-<provider>:<model>@<effort>
+<harness>[<api-provider>]:<model>@<effort>
 ```
 
-## Model matrix
+For example, `codex[openrouter]:anthropic/claude-sonnet-4.5@high` uses the Codex CLI and its `openrouter` configuration. `omp[openrouter]:z-ai/glm-5.3-flash@high` uses OMP's model registry. A model can contain `/`. Parse the effort from the last `@`.
 
-| Family | Upstream pstack choice | Provider | Model | Default effort | Selectable efforts | Claude-native agent stem |
+The API provider ID must start with a letter or digit and contain only letters, digits, underscores, and hyphens. It names trusted user configuration. A pstack model sheet never contains a base URL, credential, executable, or command template.
+
+## Default routes
+
+| Family | Upstream pstack choice | Harness | API provider | Model | Default effort | Claude-native agent stem |
 |---|---|---|---|---|---|---|
-| fable | claude-fable-5-thinking-max | claude | claude-fable-5 | max | low medium high xhigh max | fable |
-| sol | gpt-5.6-sol-max | codex | gpt-5.6-sol | max | low medium high xhigh max | - |
-| grok | grok-4.6-fast-xhigh | grok | grok-4.6 | xhigh | low medium high xhigh max | - |
-| opus | claude-opus-5-thinking-xhigh | claude | claude-opus-5 | xhigh | low medium high xhigh max | opus |
+| fable | claude-fable-5-thinking-max | claude | anthropic | claude-fable-5 | max | fable |
+| sol | gpt-5.6-sol-max | codex | openai | gpt-5.6-sol | max | - |
+| grok | grok-4.6-fast-xhigh | grok | xai | grok-4.6 | xhigh | - |
+| opus | claude-opus-5-thinking-xhigh | claude | anthropic | claude-opus-5 | xhigh | opus |
 
-The allowed effort universe is exactly `low`, `medium`, `high`, `xhigh`, `max`. First-run requested efforts are the Default effort cell of each row. A Claude-native agent stem of `-` means the family has no Claude-native agent. Otherwise the shipped agent name is `pstack-<stem>-<effort>`.
+The effort must be `low`, `medium`, `high`, `xhigh`, or `max`. The defaults above seed a first-run model sheet. They do not restrict later choices.
 
-`fast` is part of Cursor's Grok selector, not a Grok Build CLI model or effort flag. The portable Grok route pins the current CLI model `grok-4.6`. The first-run Grok effort is `xhigh`.
+`fast` belongs to Cursor's Grok selector. It is not a Grok Build CLI model or effort flag. The default portable Grok route uses `grok-4.6` at `xhigh`.
 
-## The parent owns the route
+## Harness capabilities
 
-The top-level harness resolves the route once. A child receives an assigned provider, model, effort, access mode, prompt, working directory, and output path. A child never detects the harness, chooses a provider, or launches another model. Environment markers may corroborate the top-level harness before fan-out, but nested processes inherit parent markers and must not use them for routing.
+| Harness | API providers | Provider selection |
+|---|---|---|
+| Claude CLI | `anthropic` | Fixed by the adapter |
+| Codex CLI | Any valid ID | `--config model_provider="<id>"` |
+| Grok Build CLI | `xai` | Fixed by the adapter |
+| Oh My Pi | Any valid ID | `--model <provider>/<model>` |
 
-| Parent | `claude:*` | `codex:*` | `grok:*` |
-|---|---|---|---|
-| Claude Code | native `Agent` | external runner | external runner |
-| Codex | external runner | native `spawn_agent` | external runner |
+Configure a custom Codex provider in the trusted user-level Codex configuration. For example:
 
-`inherit-parent` and `auto` remain aliases. They use the parent's current model and effort through its native subagent primitive. In a panel they still consume one lane, but they reduce provider diversity; say so in the synthesis record.
+```toml
+[model_providers.openrouter]
+name = "OpenRouter"
+base_url = "https://openrouter.ai/api/v1"
+env_key = "OPENROUTER_API_KEY"
+wire_api = "responses"
+```
 
-## Native lanes
+Codex reads the key from the named environment variable. OMP reads providers and models from its built-in catalog or `~/.omp/agent/models.yml`. Pstack passes only the provider ID and model. It does not read or copy credentials.
 
-Native dispatch avoids a second CLI startup and its base context.
+Adding another execution harness requires a code-owned adapter. The adapter must define its executable, preflight, access controls, output parser, model proof, and receipt evidence. Do not make these values configurable command templates.
 
-- Claude Code: match the descriptor's `(provider, model)` to one model-matrix row, then dispatch it through `pstack-<stem>-<effort>` using that row's Claude-native agent stem and the descriptor's effort. Those definitions pin model, effort, and `background: true`. `pstack-fable-max` and `pstack-opus-xhigh` remain in that set. Pass the complete task, grounding paths, access mode, and unique output location in the `Agent` prompt. Retain the task handle and drain it only after fan-out.
-- Codex: call `spawn_agent` with the descriptor's model and `reasoning_effort`, the complete task, grounding paths, access mode, and unique output location. Use an isolated worktree for a writer. Codex subagents already run concurrently.
+## The parent resolves the route
 
-Do not send a same-provider descriptor to the external runner. It rejects that call because the native route is cheaper and already available.
+The top-level harness resolves each route once. A child receives an assigned execution harness, API provider, model, effort, access mode, prompt, working directory, and output path. A child never detects the parent or chooses another route.
+
+Use a native lane only when the parent can prove that its native primitive runs the requested API provider, model, and effort. Otherwise, use the external runner. This rule permits same-harness external lanes. A Codex parent runs `codex[openrouter]:...` externally because `spawn_agent` cannot pin a per-lane `model_provider`. Every explicit `omp[...]` route runs externally because OMP task items cannot select an arbitrary model per call.
+
+Claude Code can run a matching shipped `pstack-<stem>-<effort>` agent natively. Codex can run a `codex[openai]:...` route natively only when the current parent uses OpenAI and `spawn_agent` can pin the requested model and effort. OMP uses its native task tool only for `inherit-parent` and `auto`. If the parent cannot prove an exact native match, route the lane externally and pin every field.
+
+`inherit-parent` and `auto` remain aliases. They use the current parent model and effort through the native subagent primitive. In a panel, each alias consumes one lane and reduces provider diversity. Record that fact in the synthesis.
 
 ## External lanes
 
-The launcher lives at `skills/poteto-mode/scripts/runner/pstack-runner` under the installed plugin. The parent writes the complete candidate prompt to a unique file, creates a unique output directory or worktree, and invokes the launcher directly. Do not put another agent in front of it.
+The launcher lives at `skills/poteto-mode/scripts/runner/pstack-runner` under the installed plugin. The parent writes the complete prompt to a unique file, chooses a working directory and unique result paths, then invokes the launcher directly.
 
 ```text
 pstack-runner \
-  --parent <claude|codex> \
-  --provider <claude|codex|grok> \
+  --parent-harness <claude|codex|omp> \
+  --harness <claude|codex|grok|omp> \
+  --api-provider <id> \
   --model <real CLI model> \
   --effort <low|medium|high|xhigh|max> \
   --mode <read-only|isolated-write> \
@@ -57,36 +75,39 @@ pstack-runner \
   [--timeout <seconds>]
 ```
 
-Pass arguments as an argv array or quote every path. Never interpolate prompt text into a shell command. The launcher preflights the assigned CLI and authentication, invokes the model exactly once, disables recursive agents and ambient skill dispatch where the CLI supports it, restricts the built-in tool surface, and records the exact provider/model/effort flags. External lanes do not receive the parent's MCP surface. Keep MCP-dependent Why and Reflect roles on `inherit-parent` or `auto`. The launcher never falls back.
+Pass each flag and value as a separate argument. Never interpolate prompt text into a shell command. The launcher invokes one model process, disables recursive agents and ambient skills, restricts the built-in tools, and records the exact route arguments. It never falls back.
 
-Grok authentication preflight has one bounded retry. If the first `grok models` result would be classified as unauthenticated, the runner waits five seconds and tries the same preflight once more. A second failure is terminal. The delay and second attempt share the runner's absolute deadline and cancellation latch, and the receipt keeps evidence from both attempts. Model execution is never retried.
+The OMP adapter sends the prompt on stdin and runs `omp -p --mode json` with the exact provider, model, and effort. It preserves repository rules, disables extensions, skills, prewalk, sessions, and LSP, and applies the shipped `omp-lane.yml`. That code-owned overlay disables OMP model fallback, context promotion, automatic compaction, and Anthropic server-side fallback. Read-only OMP lanes expose only `read`, `grep`, and `glob`. Isolated-write lanes add `write`, `edit`, and `bash` and require a dedicated worktree.
 
-The parent tool sandbox still governs whether a subscribed child CLI can reach its credentials and network. Run setup's live probe from the actual parent profile. A blocked external CLI is a loud dropout, not a reason to elevate permissions or substitute a model silently.
+The Claude and Grok adapters run their existing authentication and model preflights. The Codex OpenAI adapter runs `codex login status`. A custom Codex provider and OMP run their harness version command before the model call. The one model invocation proves that the harness accepted the provider, credentials, model, and output protocol.
 
-The parent invocation must itself be resumable background work:
+Grok authentication preflight has one bounded retry. If the first `grok models` result appears unauthenticated, the runner waits five seconds and repeats that preflight. A second failure is terminal. The delay and both attempts share the runner's absolute deadline. Model execution is never retried.
 
-- Claude Code: call the launcher through a Bash tool invocation with `run_in_background: true` and retain its task ID. A foreground Bash tool call has an automatic ten-minute ceiling even when the runner's own timeout is longer. Shelling out with `&` and losing the task handle is not equivalent.
-- Codex: run the launcher in a persistent exec session that returns a session ID, then wait or poll that handle. Do not hold one foreground tool call open for the model's full runtime.
+The parent invocation must be resumable background work:
 
-Start the background process, continue launching the other lanes, then drain their handles. Native and external lanes belong in the same fan-out phase.
+- In Claude Code, run the launcher through a background Bash tool call and retain its task ID.
+- In Codex, run the launcher in a persistent exec session and retain its session ID.
+- In OMP, run the launcher through an asynchronous Bash tool call and retain its job ID.
 
-The runner and its preflight have no implicit timeout. Do not invent a duration from role, mode, or a convenient round number; real implementation lanes can run for 90 minutes or much longer. Pass `--timeout` only when the user, an external service deadline, or a measured task contract supplies a real bound. That value starts at wrapper entry, before module loading and argument parsing, and remains one absolute deadline across setup, preflight, model execution, and output capture. It is never a fresh allowance per child, and long waits are armed in runtime-safe chunks without shortening the supplied deadline. Otherwise supervise liveness through the retained background task/session handle and cancel manually only on evidence that the run is dead. Cancel through that retained handle so the runner receives SIGINT or SIGTERM, sends it to an active child when one remains, stops waiting on inherited output pipes, removes the empty output reservation, and writes a `cancelled` receipt. Preserve that receipt; a retry is a new attempt with new unique output and receipt paths. Unchanged running state is not a dropout, and Claude's ten-minute foreground ceiling is never a reason to terminate a healthy lane.
+Start native and external lanes in the same fan-out phase. Drain every lane before judging.
 
-Read-only mode maps to Claude plan mode with project-only settings and an explicit tool list, Codex's read-only sandbox, and Grok plan mode plus its `read-only` sandbox and read-oriented tool list. Grok's built-in read-only profile deliberately keeps its own state and system temporary directories writable, so point a read-only Grok lane at the actual checkout rather than a worktree under `/tmp`, `/var/tmp`, or the host's temporary directory. `isolated-write` maps to Claude `acceptEdits` with project-only settings, Codex `workspace-write`, and Grok `acceptEdits` plus its `workspace` sandbox and write-capable tool list. Give every writer only a dedicated worktree or output directory. Never route a writer into the primary checkout.
+The runner has no implicit timeout. Pass `--timeout` only when the user, an external service, or the task sets a real deadline. The value is one deadline from wrapper entry through preflight, model execution, and output capture. Cancel through the retained process handle. The runner then removes the empty output reservation and writes a `cancelled` receipt.
 
-Every concurrent external lane needs distinct prompt, output, and receipt paths. The launcher reserves output and receipt paths exclusively and refuses to overwrite them.
+Read-only mode maps to Claude plan mode, the Codex read-only sandbox, the Grok read-only sandbox, or OMP's file-reading tool set. `isolated-write` maps to Claude `acceptEdits`, Codex `workspace-write`, Grok `acceptEdits` with its workspace sandbox, or OMP's explicit write tool set. Give each writer a dedicated worktree or output directory. Do not route a writer into a protected checkout.
+
+Every concurrent external lane needs unique prompt, output, and receipt paths. The launcher reserves output and receipt paths and refuses to overwrite them. External lanes do not receive the parent's MCP tools. Keep MCP-dependent Why and Reflect roles on `inherit-parent` or `auto`.
 
 ## Completion and dropouts
 
-Success requires all of these:
+A successful external lane satisfies all of these conditions:
 
-1. Exit status `0`.
-2. Receipt status `complete`.
-3. Either `modelVerified: true` with `modelEvidence: "provider-report"`, or a Codex receipt with `reportedModel: null`, `modelVerified: false`, and `modelEvidence: "pinned-argv"`. Codex 0.149.0 accepts the exact `--model` argument but does not report the served model in its JSONL stream.
-4. A non-empty output file.
+1. The process exits with status `0`.
+2. The schema-3 receipt has status `complete` and contains the exact requested `target`.
+3. Claude and Grok report the requested model and use `apiProviderEvidence: "adapter-fixed"`.
+4. Codex uses `modelEvidence: "pinned-argv"` when its JSONL omits the model and always uses `apiProviderEvidence: "pinned-argv"`.
+5. OMP reports the requested API provider and model and uses `apiProviderEvidence: "provider-report"`.
+6. The output file is not empty.
 
-The receipt also carries elapsed time, token usage when the CLI exposes it, and cost when available. Keep it with the arena or review artifacts so parent-harness comparisons are evidence-based.
+Pinned arguments prove what pstack asked the harness to run. They do not prove how a custom provider routed the request behind its API.
 
-Any missing CLI, failed login, unavailable model, explicit timeout, cancellation, catchable post-reservation launcher failure, non-zero child exit, malformed result, or model mismatch is a receipt-bearing dropout. Record it and apply the calling skill's existing dropout policy. A `cancelled` receipt proves that the runner received the signal; its `signal` field is non-null only when the runner sent that signal to a still-active direct CLI child, and remains null when cancellation only stopped a post-exit pipe drain. The provider CLI owns any processes it starts beneath that direct child; the receipt does not claim a process-tree kill. Do not delete or overwrite the receipt. Never substitute the parent model, retry another provider, or reinterpret an external descriptor as a native model slug.
-
-Start native and external lanes in the same fan-out phase, then wait for all of them before judging. A judge must not read candidate paths while their owners are still writing.
+A missing CLI, failed authentication, unavailable model, explicit timeout, cancellation, non-zero child exit, malformed result, or model mismatch is a receipt-bearing dropout. Preserve the receipt and apply the calling skill's dropout policy. Never substitute the parent model, retry another provider, or reinterpret an external route as a native model slug.

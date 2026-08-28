@@ -46,12 +46,13 @@ else
 fi
 
 # Static invariant (CHANGES maintenance note): provider-dispatch owns the default
-# provider/model quad and the four panel skills plus setup-pstack copy it verbatim.
+# harness/provider/model quad and the four panel skills plus setup-pstack copy it
+# verbatim.
 setup="$repo/plugins/pstack/skills/setup-pstack/SKILL.md"
 dispatch="$repo/plugins/pstack/skills/poteto-mode/references/provider-dispatch.md"
-quad_of() { { grep -oE '(claude|codex|grok):[a-z0-9.-]+@(low|medium|high|xhigh|max)' || true; } | tr '\n' ' ' | sed 's/ $//'; }
+quad_of() { { grep -oE '(claude|codex|grok)\[[A-Za-z0-9][A-Za-z0-9_-]*\]:[^ @,]+@(low|medium|high|xhigh|max)' || true; } | tr '\n' ' ' | sed 's/ $//'; }
 canon_quad="$(awk '
-  $0 == "## Model matrix" { in_matrix = 1; next }
+  $0 == "## Default routes" { in_matrix = 1; next }
   in_matrix && /^## / { exit }
   in_matrix && /^\|/ {
     line = $0
@@ -64,11 +65,12 @@ canon_quad="$(awk '
     }
     family = cells[1]
     if (family == "Family" || family ~ /^:?-+:?$/) next
-    provider = cells[3]
-    model = cells[4]
-    effort = cells[5]
+    harness = cells[3]
+    provider = cells[4]
+    model = cells[5]
+    effort = cells[6]
     if (out != "") out = out " "
-    out = out provider ":" model "@" effort
+    out = out harness "[" provider "]:" model "@" effort
   }
   END { print out }
 ' "$dispatch")"

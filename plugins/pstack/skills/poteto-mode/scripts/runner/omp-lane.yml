@@ -1,0 +1,9 @@
+retry:
+  modelFallback: false
+contextPromotion:
+  enabled: false
+compaction:
+  enabled: false
+providers:
+  anthropic:
+    serverSideFallback: false

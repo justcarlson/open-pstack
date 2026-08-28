@@ -1,7 +1,7 @@
 import type {
+  ExecutionHarness,
   NormalizedUsage,
   ParsedOutput,
-  Provider,
 } from "./types.ts";
 
 type JsonObject = Record<string, unknown>;
@@ -24,18 +24,22 @@ function normalizedUsage(value: unknown): NormalizedUsage | null {
   const usage = object(value);
   if (usage === null) return null;
   const result: NormalizedUsage = {
-    inputTokens: finiteNumber(usage.input_tokens),
+    inputTokens: finiteNumber(usage.input_tokens ?? usage.input),
     cachedInputTokens: finiteNumber(
-      usage.cached_input_tokens ?? usage.cache_read_input_tokens
+      usage.cached_input_tokens ??
+        usage.cache_read_input_tokens ??
+        usage.cacheRead
     ),
     cacheCreationInputTokens: finiteNumber(
-      usage.cache_creation_input_tokens ?? usage.cache_write_input_tokens
+      usage.cache_creation_input_tokens ??
+        usage.cache_write_input_tokens ??
+        usage.cacheWrite
     ),
-    outputTokens: finiteNumber(usage.output_tokens),
+    outputTokens: finiteNumber(usage.output_tokens ?? usage.output),
     reasoningTokens: finiteNumber(
       usage.reasoning_tokens ?? usage.reasoning_output_tokens
     ),
-    totalTokens: finiteNumber(usage.total_tokens),
+    totalTokens: finiteNumber(usage.total_tokens ?? usage.totalTokens),
   };
   return Object.values(result).some((entry) => entry !== undefined)
     ? result
@@ -67,6 +71,7 @@ function parseClaude(stdout: string, requestedModel: string): ParsedOutput {
 
   return {
     text,
+    reportedApiProvider: null,
     reportedModel: modelFromUsage(value.modelUsage, requestedModel),
     sessionId: nullableString(value.session_id ?? value.sessionId),
     usage: normalizedUsage(value.usage),
@@ -98,6 +103,7 @@ function parseGrok(stdout: string, requestedModel: string): ParsedOutput {
   return {
     text,
     reportedModel: modelFromUsage(result.modelUsage, requestedModel),
+    reportedApiProvider: null,
     sessionId: nullableString(result.session_id),
     usage: normalizedUsage(result.usage),
     costUsd: finiteNumber(result.total_cost_usd) ?? null,
@@ -141,26 +147,97 @@ function parseCodex(stdout: string): ParsedOutput {
   return {
     text,
     reportedModel: null,
+    reportedApiProvider: null,
     sessionId,
     usage,
     costUsd: null,
   };
 }
 
-export function parseProviderOutput(
-  provider: Provider,
+function textContent(value: unknown): string | null {
+  if (!Array.isArray(value)) return null;
+  let text = "";
+  for (const rawBlock of value) {
+    const block = object(rawBlock);
+    if (block?.type === "text" && typeof block.text === "string") {
+      text += block.text;
+    }
+  }
+  return nullableString(text);
+}
+
+function parseOmp(stdout: string): ParsedOutput {
+  let finalMessage: JsonObject | null = null;
+  let sessionId: string | null = null;
+  let terminal = false;
+
+  for (const line of stdout.split("\n")) {
+    if (line.trim().length === 0) continue;
+    let raw: unknown;
+    try {
+      raw = JSON.parse(line);
+    } catch {
+      throw new Error("omp emitted a non-JSON event");
+    }
+    const event = object(raw);
+    if (event === null) continue;
+    if (event.type === "retry_fallback_applied") {
+      throw new Error("omp reported a model fallback");
+    }
+    if (event.type === "session") {
+      sessionId = nullableString(event.id) ?? sessionId;
+    }
+    if (event.type === "message_end") {
+      const message = object(event.message);
+      if (message?.role === "assistant") finalMessage = message;
+    }
+    if (event.type === "agent_end" && event.isTerminal !== false) {
+      terminal = true;
+    }
+  }
+
+  if (!terminal) throw new Error("omp result did not contain a terminal event");
+  if (finalMessage === null) {
+    throw new Error("omp result did not contain a final assistant message");
+  }
+  if (
+    finalMessage.stopReason === "error" ||
+    finalMessage.stopReason === "aborted"
+  ) {
+    throw new Error(`omp reported ${finalMessage.stopReason}`);
+  }
+  const text = textContent(finalMessage.content);
+  if (text === null) throw new Error("omp result did not contain final text");
+  const usage = object(finalMessage.usage);
+  const cost = object(usage?.cost);
+
+  return {
+    text,
+    reportedApiProvider: nullableString(finalMessage.provider),
+    reportedModel: nullableString(finalMessage.model),
+    sessionId,
+    usage: normalizedUsage(usage),
+    costUsd: finiteNumber(cost?.total) ?? null,
+  };
+}
+
+export function parseHarnessOutput(
+  harness: ExecutionHarness,
   stdout: string,
   stderr: string,
   requestedModel: string
 ): ParsedOutput {
-  switch (provider) {
+  switch (harness) {
     case "claude":
       return parseClaude(stdout, requestedModel);
     case "codex":
       return parseCodex(stdout);
     case "grok":
       return parseGrok(stdout, requestedModel);
+    case "omp":
+      return parseOmp(stdout);
   }
+
 }
 
 export function reportedModelMatches(

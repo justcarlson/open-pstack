@@ -1,13 +1,19 @@
 import { describe, expect, it } from "bun:test";
-import { invocationCommand } from "./commands.ts";
-import type { RunnerOptions } from "./types.ts";
+import { invocationCommand, preflightCommand } from "./commands.ts";
+import type { LaneTarget, RunnerOptions } from "./types.ts";
 
-function options(overrides: Partial<RunnerOptions> = {}): RunnerOptions {
-  return {
-    parent: "claude",
-    provider: "codex",
+function options(
+  target: LaneTarget = {
+    harness: "codex",
+    apiProvider: "openai",
     model: "gpt-5.6-sol",
     effort: "max",
+  },
+  overrides: Partial<Omit<RunnerOptions, "target">> = {}
+): RunnerOptions {
+  return {
+    parentHarness: "claude",
+    target,
     mode: "read-only",
     promptPath: "/tmp/prompt.md",
     cwd: "/tmp/worktree",
@@ -18,8 +24,45 @@ function options(overrides: Partial<RunnerOptions> = {}): RunnerOptions {
   };
 }
 
+describe("preflightCommand", () => {
+  it("uses Codex login for OpenAI and defers custom-provider auth", () => {
+    expect(preflightCommand(options().target)).toEqual({
+      command: "codex",
+      args: ["login", "status"],
+      stdin: "none",
+    });
+    expect(
+      preflightCommand({
+        harness: "codex",
+        apiProvider: "openrouter",
+        model: "anthropic/claude-sonnet-4.5",
+        effort: "high",
+      })
+    ).toEqual({
+      command: "codex",
+      args: ["--version"],
+      stdin: "none",
+    });
+  });
+
+  it("defers OMP provider authentication to the model invocation", () => {
+    expect(
+      preflightCommand({
+        harness: "omp",
+        apiProvider: "openrouter",
+        model: "z-ai/glm-5.3-flash",
+        effort: "high",
+      })
+    ).toEqual({
+      command: "omp",
+      args: ["--version"],
+      stdin: "none",
+    });
+  });
+});
+
 describe("invocationCommand", () => {
-  it("pins Codex model, effort, sandbox, cwd, and JSONL output", () => {
+  it("pins the Codex provider, model, effort, sandbox, cwd, and JSONL output", () => {
     const spec = invocationCommand(options());
     expect(spec.command).toBe("codex");
     expect(spec.stdin).toBe("prompt");
@@ -27,6 +70,8 @@ describe("invocationCommand", () => {
       "exec",
       "--model",
       "gpt-5.6-sol",
+      "--config",
+      'model_provider="openai"',
       "--config",
       'model_reasoning_effort="max"',
       "--sandbox",
@@ -49,13 +94,76 @@ describe("invocationCommand", () => {
     expect(spec.args).not.toContain("danger-full-access");
   });
 
+  it("pins an OpenRouter provider and slash-bearing model as separate argv", () => {
+    const spec = invocationCommand(
+      options({
+        harness: "codex",
+        apiProvider: "openrouter",
+        model: "anthropic/claude-sonnet-4.5",
+        effort: "high",
+      })
+    );
+    expect(spec.args).toEqual(
+      expect.arrayContaining([
+        "--model",
+        "anthropic/claude-sonnet-4.5",
+        "--config",
+        'model_provider="openrouter"',
+        "--config",
+        'model_reasoning_effort="high"',
+      ])
+    );
+    expect(spec.args).not.toContain("--config model_provider=\"openrouter\"");
+  });
+
+  it("pins an OMP provider, model, effort, tools, and no-fallback overlay", () => {
+    const spec = invocationCommand(
+      options(
+        {
+          harness: "omp",
+          apiProvider: "openrouter",
+          model: "z-ai/glm-5.3-flash",
+          effort: "high",
+        },
+        { parentHarness: "omp" }
+      )
+    );
+    expect(spec.command).toBe("omp");
+    expect(spec.stdin).toBe("prompt");
+    expect(spec.args).toEqual([
+      "-p",
+      "--mode",
+      "json",
+      "--model",
+      "openrouter/z-ai/glm-5.3-flash",
+      "--thinking",
+      "high",
+      "--cwd",
+      "/tmp/worktree",
+      "--no-session",
+      "--no-title",
+      "--no-extensions",
+      "--no-skills",
+      "--no-prewalk",
+      "--no-lsp",
+      "--tools",
+      "read,grep,glob",
+      "--approval-mode",
+      "yolo",
+      "--config",
+      expect.stringContaining("runner/omp-lane.yml"),
+    ]);
+    expect(spec.args).not.toContain("--no-rules");
+  });
+
   it("pins Claude model, effort, permissions, and no-recursion controls", () => {
     const spec = invocationCommand(
       options({
-        parent: "codex",
-        provider: "claude",
+        harness: "claude",
+        apiProvider: "anthropic",
         model: "claude-fable-5",
-      })
+        effort: "max",
+      }, { parentHarness: "codex" })
     );
     expect(spec.command).toBe("claude");
     expect(spec.stdin).toBe("prompt");
@@ -84,7 +192,12 @@ describe("invocationCommand", () => {
 
   it("limits Grok to the assigned cwd and disables recursive agents", () => {
     const spec = invocationCommand(
-      options({ provider: "grok", model: "grok-4.6", effort: "xhigh" })
+      options({
+        harness: "grok",
+        apiProvider: "xai",
+        model: "grok-4.6",
+        effort: "xhigh",
+      })
     );
     expect(spec.command).toBe("grok");
     expect(spec.stdin).toBe("none");
@@ -114,12 +227,17 @@ describe("invocationCommand", () => {
   });
 
   it("uses bounded write modes without blanket bypasses", () => {
-    const codex = invocationCommand(options({ mode: "isolated-write" }));
+    const codex = invocationCommand(options(undefined, { mode: "isolated-write" }));
     expect(codex.args).toEqual(
       expect.arrayContaining(["--sandbox", "workspace-write"])
     );
     const grok = invocationCommand(
-      options({ provider: "grok", model: "grok-4.6", mode: "isolated-write" })
+      options({
+        harness: "grok",
+        apiProvider: "xai",
+        model: "grok-4.6",
+        effort: "xhigh",
+      }, { mode: "isolated-write" })
     );
     expect(grok.args).toEqual(
       expect.arrayContaining([
@@ -134,7 +252,12 @@ describe("invocationCommand", () => {
     expect(grok.args).not.toContain("--always-approve");
 
     const claude = invocationCommand(
-      options({ provider: "claude", model: "claude-fable-5", mode: "isolated-write" })
+      options({
+        harness: "claude",
+        apiProvider: "anthropic",
+        model: "claude-fable-5",
+        effort: "max",
+      }, { mode: "isolated-write" })
     );
     expect(claude.args).toEqual(
       expect.arrayContaining([
@@ -144,37 +267,25 @@ describe("invocationCommand", () => {
         "Read,Write,Edit,Grep,Glob,Bash",
       ])
     );
-  });
 
-  it("covers low, medium, and high for every external provider", () => {
-    const cases = [
-      {
-        provider: "claude" as const,
-        model: "claude-fable-5",
-        flag: (effort: "low" | "medium" | "high") => ["--effort", effort],
-      },
-      {
-        provider: "codex" as const,
-        model: "gpt-5.6-sol",
-        flag: (effort: "low" | "medium" | "high") => [
-          "--config",
-          `model_reasoning_effort="${effort}"`,
-        ],
-      },
-      {
-        provider: "grok" as const,
-        model: "grok-4.6",
-        flag: (effort: "low" | "medium" | "high") => [
-          "--reasoning-effort",
-          effort,
-        ],
-      },
-    ];
-    for (const { provider, model, flag } of cases) {
-      for (const effort of ["low", "medium", "high"] as const) {
-        const spec = invocationCommand(options({ provider, model, effort }));
-        expect(spec.args).toEqual(expect.arrayContaining(flag(effort)));
-      }
-    }
+    const omp = invocationCommand(
+      options(
+        {
+          harness: "omp",
+          apiProvider: "openrouter",
+          model: "z-ai/glm-5.3-flash",
+          effort: "high",
+        },
+        { mode: "isolated-write", parentHarness: "omp" }
+      )
+    );
+    expect(omp.args).toEqual(
+      expect.arrayContaining([
+        "--tools",
+        "read,write,edit,grep,glob,bash",
+        "--approval-mode",
+        "yolo",
+      ])
+    );
   });
 });

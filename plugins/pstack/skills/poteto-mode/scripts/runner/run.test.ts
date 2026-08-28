@@ -14,7 +14,12 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { childEnvironment, runLane } from "./run.ts";
 import { main } from "./cli.ts";
-import type { Provider, RunnerOptions, RunnerReceipt } from "./types.ts";
+import type {
+  ExecutionHarness,
+  LaneTarget,
+  RunnerOptions,
+  RunnerReceipt,
+} from "./types.ts";
 
 let scratch = "";
 let bin = "";
@@ -27,8 +32,16 @@ const name = process.argv[1].split("/").at(-1);
 const isPreflight =
   (name === "claude" && args[0] === "auth") ||
   (name === "codex" && args[0] === "login") ||
-  (name === "grok" && args[0] === "models");
+  (name === "grok" && args[0] === "models") ||
+  (name === "omp" && args[0] === "--version");
 const stage = isPreflight ? "preflight" : "model";
+if (
+  process.env.FAKE_REQUIRE_OPENROUTER_KEY === "1" &&
+  process.env.OPENROUTER_API_KEY !== "secret-sentinel"
+) {
+  console.error("missing provider credential");
+  process.exit(1);
+}
 const startedPath = isPreflight
   ? process.env.FAKE_PREFLIGHT_STARTED_PATH
   : process.env.FAKE_MODEL_STARTED_PATH;
@@ -63,6 +76,10 @@ if (name === "claude" && args[0] === "auth") {
 }
 if (name === "codex" && args[0] === "login") {
   console.log("Logged in using ChatGPT");
+  process.exit(0);
+}
+if (name === "omp" && args[0] === "--version") {
+  console.log("omp 0.0-test");
   process.exit(0);
 }
 if (name === "grok" && args[0] === "models") {
@@ -115,6 +132,15 @@ if (name === "claude") {
   console.log(JSON.stringify({type:"thread.started",thread_id:"o1"}));
   console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"CODEX_OK"}}));
   console.log(JSON.stringify({type:"turn.completed",usage:{input_tokens:20,cached_input_tokens:5,output_tokens:3,reasoning_output_tokens:1}}));
+} else if (name === "omp") {
+  const [provider, ...modelParts] = model.split("/");
+  const reportedModel = modelParts.join("/");
+  console.log(JSON.stringify({type:"session",id:"omp1"}));
+  if (process.env.FAKE_OMP_FALLBACK === "1") {
+    console.log(JSON.stringify({type:"retry_fallback_applied",from:model,to:"other/model"}));
+  }
+  console.log(JSON.stringify({type:"message_end",message:{role:"assistant",content:[{type:"text",text:"OMP_OK"}],provider,model:reportedModel,usage:{input:40,output:5,cacheRead:2,cacheWrite:1,totalTokens:48,cost:{total:0.03}},stopReason:"stop"}}));
+  console.log(JSON.stringify({type:"agent_end",messages:[],isTerminal:true}));
 } else {
   console.log(JSON.stringify({type:"assistant",message:{content:[{type:"text",text:"progress"}]}}));
   console.log(JSON.stringify({type:"result",subtype:"success",is_error:false,result:"GROK_OK",session_id:"g1",usage:{input_tokens:30,output_tokens:4,total_tokens:34},total_cost_usd:0.02,modelUsage:{[model + "-build"]:{}}}));
@@ -130,19 +156,56 @@ function makeExecutable(name: string): void {
   chmodSync(path, 0o755);
 }
 
-function options(provider: Provider, suffix: string = provider): RunnerOptions {
-  const parent = provider === "codex" ? "claude" : "codex";
-  const model =
-    provider === "claude"
-      ? "claude-fable-5"
-      : provider === "codex"
-        ? "gpt-5.6-sol"
-        : "grok-4.6";
+function target(harness: ExecutionHarness, apiProvider?: string): LaneTarget {
+  switch (harness) {
+    case "claude":
+      if (apiProvider !== undefined && apiProvider !== "anthropic") {
+        throw new Error("Claude test target requires anthropic");
+      }
+      return {
+        harness,
+        apiProvider: "anthropic",
+        model: "claude-fable-5",
+        effort: "max",
+      };
+    case "codex":
+      return {
+        harness,
+        apiProvider: apiProvider ?? "openai",
+        model:
+          apiProvider === "openrouter"
+            ? "anthropic/claude-sonnet-4.5"
+            : "gpt-5.6-sol",
+        effort: apiProvider === "openrouter" ? "high" : "max",
+      };
+    case "omp":
+      return {
+        harness,
+        apiProvider: apiProvider ?? "openrouter",
+        model: "z-ai/glm-5.3-flash",
+        effort: "high",
+      };
+    case "grok":
+      if (apiProvider !== undefined && apiProvider !== "xai") {
+        throw new Error("Grok test target requires xai");
+      }
+      return {
+        harness,
+        apiProvider: "xai",
+        model: "grok-4.6",
+        effort: "xhigh",
+      };
+  }
+}
+
+function options(
+  harness: ExecutionHarness,
+  suffix: string = harness,
+  apiProvider?: string
+): RunnerOptions {
   return {
-    parent,
-    provider,
-    model,
-    effort: provider === "grok" ? "xhigh" : "max",
+    parentHarness: harness === "codex" ? "claude" : "codex",
+    target: target(harness, apiProvider),
     mode: "read-only",
     promptPath: join(scratch, "prompt.md"),
     cwd: scratch,
@@ -159,10 +222,11 @@ function receipt(path: string): RunnerReceipt {
 function runnerArgs(input: RunnerOptions): string[] {
   const args = [
     join(import.meta.dir, "pstack-runner"),
-    "--parent", input.parent,
-    "--provider", input.provider,
-    "--model", input.model,
-    "--effort", input.effort,
+    "--parent-harness", input.parentHarness,
+    "--harness", input.target.harness,
+    "--api-provider", input.target.apiProvider,
+    "--model", input.target.model,
+    "--effort", input.target.effort,
     "--mode", input.mode,
     "--prompt", input.promptPath,
     "--cwd", input.cwd,
@@ -216,7 +280,7 @@ beforeEach(() => {
   bin = join(scratch, "bin");
   mkdirSync(bin);
   writeFileSync(join(scratch, "prompt.md"), "Return the marker.");
-  for (const name of ["claude", "codex", "grok"]) makeExecutable(name);
+  for (const name of ["claude", "codex", "grok", "omp"]) makeExecutable(name);
   previousPath = process.env.PATH;
   process.env.PATH = `${bin}:${dirname(process.execPath)}:${previousPath ?? ""}`;
   delete process.env.FAKE_TIMEOUT;
@@ -239,6 +303,9 @@ beforeEach(() => {
   delete process.env.FAKE_DESCENDANT_HOLDS_PIPES_MS;
   delete process.env.FAKE_DESCENDANT_PID_PATH;
   delete process.env.FAKE_SELF_SIGNAL;
+  delete process.env.FAKE_OMP_FALLBACK;
+  delete process.env.FAKE_REQUIRE_OPENROUTER_KEY;
+  delete process.env.OPENROUTER_API_KEY;
 });
 
 afterEach(() => {
@@ -263,39 +330,72 @@ afterEach(() => {
   delete process.env.FAKE_DESCENDANT_HOLDS_PIPES_MS;
   delete process.env.FAKE_DESCENDANT_PID_PATH;
   delete process.env.FAKE_SELF_SIGNAL;
+  delete process.env.FAKE_OMP_FALLBACK;
+  delete process.env.FAKE_REQUIRE_OPENROUTER_KEY;
+  delete process.env.OPENROUTER_API_KEY;
   rmSync(scratch, { recursive: true, force: true });
 });
 
 describe("runLane", () => {
-  for (const provider of ["claude", "codex", "grok"] as const) {
-    it(`executes and receipts the ${provider} external lane`, async () => {
-      const input = options(provider);
+  for (const harness of ["claude", "codex", "grok", "omp"] as const) {
+    it(`executes and receipts the ${harness} external lane`, async () => {
+      const input = options(harness);
       const result = await runLane(input);
       expect(result.exitCode).toBe(0);
       expect(readFileSync(input.outputPath, "utf8")).toContain(
-        provider.toUpperCase()
+        harness.toUpperCase()
       );
       expect(receipt(input.receiptPath)).toMatchObject({
+        schemaVersion: 3,
         status: "complete",
-        provider,
-        model: input.model,
-        modelVerified: provider !== "codex",
-        modelEvidence: provider === "codex" ? "pinned-argv" : "provider-report",
+        target: input.target,
+        reportedApiProvider:
+          harness === "omp" ? input.target.apiProvider : null,
+        modelVerified: harness !== "codex",
+        modelEvidence: harness === "codex" ? "pinned-argv" : "provider-report",
+        apiProviderEvidence:
+          harness === "codex"
+            ? "pinned-argv"
+            : harness === "omp"
+              ? "provider-report"
+              : "adapter-fixed",
         preflight: { status: "passed" },
       });
     });
   }
 
-  it("records Codex's exact argv without fabricating a reported model", async () => {
+  it("rejects an OMP model fallback even when the child exits successfully", async () => {
+    process.env.FAKE_OMP_FALLBACK = "1";
+    const input = options("omp", "omp-fallback");
+    const result = await runLane(input);
+    expect(result.exitCode).toBe(65);
+    expect(existsSync(input.outputPath)).toBe(false);
+    expect(receipt(input.receiptPath)).toMatchObject({
+      schemaVersion: 3,
+      status: "malformed-output",
+      reportedApiProvider: null,
+      modelEvidence: null,
+      apiProviderEvidence: null,
+      error: { message: "omp reported a model fallback" },
+    });
+  });
+
+  it("records Codex's exact target without fabricating a reported model", async () => {
     const input = options("codex");
     const result = await runLane(input);
     expect(result.exitCode).toBe(0);
     expect(receipt(input.receiptPath)).toMatchObject({
       status: "complete",
-      model: "gpt-5.6-sol",
+      target: {
+        harness: "codex",
+        apiProvider: "openai",
+        model: "gpt-5.6-sol",
+        effort: "max",
+      },
       reportedModel: null,
       modelVerified: false,
       modelEvidence: "pinned-argv",
+      apiProviderEvidence: "pinned-argv",
     });
   });
 
@@ -307,7 +407,7 @@ describe("runLane", () => {
     expect(existsSync(input.outputPath)).toBe(false);
     expect(receipt(input.receiptPath)).toMatchObject({
       status: "unavailable-model",
-      model: "gpt-5.6-sol",
+      target: { model: "gpt-5.6-sol" },
       reportedModel: null,
       modelVerified: false,
       modelEvidence: null,
@@ -883,36 +983,70 @@ describe("runLane", () => {
     expect(receipt(retry.receiptPath).status).toBe("complete");
   });
 
-  it("rejects same-provider recursion", async () => {
-    const input = { ...options("claude"), parent: "claude" as const };
-    await expect(runLane(input)).rejects.toThrow("native to parent");
+  it("runs a same-harness custom-provider route externally", async () => {
+    process.env.FAKE_REQUIRE_OPENROUTER_KEY = "1";
+    process.env.OPENROUTER_API_KEY = "secret-sentinel";
+    const input: RunnerOptions = {
+      ...options("codex", "openrouter", "openrouter"),
+      parentHarness: "codex",
+    };
+    const result = await runLane(input);
+    expect(result.exitCode).toBe(0);
+    expect(receipt(input.receiptPath)).toMatchObject({
+      status: "complete",
+      parentHarness: "codex",
+      target: {
+        harness: "codex",
+        apiProvider: "openrouter",
+        model: "anthropic/claude-sonnet-4.5",
+        effort: "high",
+      },
+      apiProviderEvidence: "pinned-argv",
+    });
+    expect(readFileSync(input.receiptPath, "utf8")).not.toContain(
+      "secret-sentinel"
+    );
+  });
+
+  it("runs an explicit OMP target externally under an OMP parent", async () => {
+    const input: RunnerOptions = {
+      ...options("omp", "omp-parent"),
+      parentHarness: "omp",
+    };
+    expect((await runLane(input)).exitCode).toBe(0);
+    expect(receipt(input.receiptPath)).toMatchObject({
+      schemaVersion: 3,
+      status: "complete",
+      parentHarness: "omp",
+      target: {
+        harness: "omp",
+        apiProvider: "openrouter",
+        model: "z-ai/glm-5.3-flash",
+        effort: "high",
+      },
+      reportedApiProvider: "openrouter",
+      reportedModel: "z-ai/glm-5.3-flash",
+      modelEvidence: "provider-report",
+      apiProviderEvidence: "provider-report",
+    });
   });
 });
 
 describe("childEnvironment", () => {
-  it("removes only inherited runtime identity needed to avoid nested detection", () => {
+  it("removes both harness identities while retaining provider credentials", () => {
     const source = {
       PATH: "/bin",
       CODEX_THREAD_ID: "codex",
       CODEX_CI: "1",
       CLAUDECODE: "1",
       CLAUDE_CODE_CHILD_SESSION: "1",
+      PI_BLOCKED_AGENT: "task",
+      OPENROUTER_API_KEY: "secret-sentinel",
       KEEP_ME: "yes",
     };
-    expect(childEnvironment("claude", source)).toEqual({
+    expect(childEnvironment(source)).toEqual({
       PATH: "/bin",
-      CLAUDECODE: "1",
-      CLAUDE_CODE_CHILD_SESSION: "1",
-      KEEP_ME: "yes",
-    });
-    expect(childEnvironment("codex", source)).toEqual({
-      PATH: "/bin",
-      CODEX_THREAD_ID: "codex",
-      CODEX_CI: "1",
-      KEEP_ME: "yes",
-    });
-    expect(childEnvironment("grok", source)).toEqual({
-      PATH: "/bin",
+      OPENROUTER_API_KEY: "secret-sentinel",
       KEEP_ME: "yes",
     });
   });

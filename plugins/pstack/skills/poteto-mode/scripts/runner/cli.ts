@@ -3,25 +3,27 @@ import { resolvedOptions, runLane } from "./run.ts";
 import {
   ACCESS_MODES,
   EFFORTS,
-  PARENTS,
-  PROVIDERS,
+  EXECUTION_HARNESSES,
+  PARENT_HARNESSES,
   type AccessMode,
   type Effort,
-  type Parent,
-  type Provider,
+  type ExecutionHarness,
+  type LaneTarget,
+  type ParentHarness,
   type RunnerOptions,
   UsageError,
 } from "./types.ts";
 
-const HELP = `Usage: pstack-runner --parent <claude|codex> --provider <claude|codex|grok> \\
-  --model <slug> --effort <level> --mode <read-only|isolated-write> \\
-  --prompt <file> --cwd <dir> --output <file> --receipt <file> [--timeout <seconds>]
+const HELP = `Usage: pstack-runner --parent-harness <claude|codex|omp> \\
+  --harness <claude|codex|grok|omp> --api-provider <id> --model <slug> \\
+  --effort <level> --mode <read-only|isolated-write> --prompt <file> \\
+  --cwd <dir> --output <file> --receipt <file> [--timeout <seconds>]
 
-Runs exactly one external model lane. Same-provider calls are rejected; use the
-parent harness's native subagent primitive for those lanes. Output and receipt
-paths must not already exist. There is no implicit timeout. Pass --timeout only
-when the user or task supplies a real deadline; it is one end-to-end launcher
-deadline shared by setup, preflight, and model execution.
+Runs exactly one external model lane. The parent resolves native versus external
+dispatch before invoking this runner. Output and receipt paths must not already
+exist. There is no implicit timeout. Pass --timeout only when the user or task
+supplies a real deadline; it is one end-to-end launcher deadline shared by
+setup, preflight, and model execution.
 `;
 
 interface Io {
@@ -56,6 +58,40 @@ function stringValue(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+function apiProvider(value: string | undefined): string {
+  const provider = required("api-provider", value);
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(provider)) {
+    throw new UsageError(
+      "api-provider must contain only letters, digits, underscores, and hyphens"
+    );
+  }
+  return provider;
+}
+
+function laneTarget(
+  harness: ExecutionHarness,
+  provider: string,
+  model: string,
+  effort: Effort
+): LaneTarget {
+  switch (harness) {
+    case "claude":
+      if (provider !== "anthropic") {
+        throw new UsageError("claude harness requires api-provider anthropic");
+      }
+      return { harness, apiProvider: provider, model, effort };
+    case "codex":
+      return { harness, apiProvider: provider, model, effort };
+    case "omp":
+      return { harness, apiProvider: provider, model, effort };
+    case "grok":
+      if (provider !== "xai") {
+        throw new UsageError("grok harness requires api-provider xai");
+      }
+      return { harness, apiProvider: provider, model, effort };
+  }
+}
+
 export function parseArgs(argv: readonly string[]): RunnerOptions | null {
   let parsed: ReturnType<typeof parseNodeArgs>;
   try {
@@ -64,8 +100,9 @@ export function parseArgs(argv: readonly string[]): RunnerOptions | null {
       allowPositionals: false,
       strict: true,
       options: {
-        parent: { type: "string" },
-        provider: { type: "string" },
+        "parent-harness": { type: "string" },
+        harness: { type: "string" },
+        "api-provider": { type: "string" },
         model: { type: "string" },
         effort: { type: "string" },
         mode: { type: "string" },
@@ -94,11 +131,24 @@ export function parseArgs(argv: readonly string[]): RunnerOptions | null {
   ) {
     throw new UsageError("timeout must be a number greater than zero");
   }
+  const harness = oneOf(
+    "harness",
+    stringValue(parsed.values.harness),
+    EXECUTION_HARNESSES
+  ) as ExecutionHarness;
+  const target = laneTarget(
+    harness,
+    apiProvider(stringValue(parsed.values["api-provider"])),
+    required("model", stringValue(parsed.values.model)),
+    oneOf("effort", stringValue(parsed.values.effort), EFFORTS) as Effort
+  );
   return resolvedOptions({
-    parent: oneOf("parent", stringValue(parsed.values.parent), PARENTS) as Parent,
-    provider: oneOf("provider", stringValue(parsed.values.provider), PROVIDERS) as Provider,
-    model: required("model", stringValue(parsed.values.model)),
-    effort: oneOf("effort", stringValue(parsed.values.effort), EFFORTS) as Effort,
+    parentHarness: oneOf(
+      "parent-harness",
+      stringValue(parsed.values["parent-harness"]),
+      PARENT_HARNESSES
+    ) as ParentHarness,
+    target,
     mode,
     promptPath: required("prompt", stringValue(parsed.values.prompt)),
     cwd: required("cwd", stringValue(parsed.values.cwd)),

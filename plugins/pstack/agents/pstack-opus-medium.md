@@ -1,6 +1,6 @@
 ---
 name: pstack-opus-medium
-description: Native Claude lane for pstack roles configured as claude:claude-opus-5@medium.
+description: Native Claude lane for pstack roles configured as claude[anthropic]:claude-opus-5@medium.
 model: claude-opus-5
 effort: medium
 background: true

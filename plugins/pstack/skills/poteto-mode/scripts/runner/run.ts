@@ -10,9 +10,9 @@ import {
 } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { invocationCommand, preflightCommand, type CommandSpec } from "./commands.ts";
-import { parseProviderOutput, reportedModelMatches } from "./parse-output.ts";
+import { parseHarnessOutput, reportedModelMatches } from "./parse-output.ts";
 import type {
-  Provider,
+  LaneTarget,
   ReceiptStatus,
   RunnerOptions,
   RunnerReceipt,
@@ -127,18 +127,17 @@ const CLAUDE_IDENTITY = [
   "CLAUDE_CODE_SESSION_ID",
   "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS",
 ] as const;
+const HARNESS_IDENTITY = [
+  ...CODEX_IDENTITY,
+  ...CLAUDE_IDENTITY,
+  "PI_BLOCKED_AGENT",
+] as const;
 
 export function childEnvironment(
-  provider: Provider,
   source: NodeJS.ProcessEnv = process.env
 ): NodeJS.ProcessEnv {
   const result = { ...source };
-  const remove = provider === "claude"
-    ? CODEX_IDENTITY
-    : provider === "codex"
-      ? CLAUDE_IDENTITY
-      : [...CODEX_IDENTITY, ...CLAUDE_IDENTITY];
-  for (const key of remove) delete result[key];
+  for (const key of HARNESS_IDENTITY) delete result[key];
   return result;
 }
 
@@ -349,33 +348,45 @@ async function waitForGrokPreflightRetry(
   }
 }
 
-function preflightPassed(provider: Provider, model: string, result: ProcessResult): boolean {
+function preflightPassed(target: LaneTarget, result: ProcessResult): boolean {
   if (result.exitCode !== 0 || result.timedOut) return false;
   const combined = `${result.stdout}\n${result.stderr}`;
-  switch (provider) {
+  switch (target.harness) {
     case "claude": {
       try {
         const value: unknown = JSON.parse(result.stdout);
         return (
           value !== null &&
           typeof value === "object" &&
-          (value as { loggedIn?: unknown }).loggedIn === true
+          "loggedIn" in value &&
+          value.loggedIn === true
         );
       } catch {
         return false;
       }
     }
     case "codex":
-      return /logged in/i.test(combined);
+      return target.apiProvider === "openai"
+        ? /logged in/i.test(combined)
+        : true;
+    case "omp":
+      return true;
     case "grok":
-      return /logged in/i.test(combined) && combined.includes(model);
+      return /logged in/i.test(combined) && combined.includes(target.model);
   }
 }
 
-function successfulPreflightEvidence(provider: Provider, model: string): string {
-  return provider === "grok"
-    ? `authenticated; model ${model} available`
-    : "authenticated";
+function successfulPreflightEvidence(target: LaneTarget): string {
+  if (target.harness === "grok") {
+    return `authenticated; model ${target.model} available`;
+  }
+  if (
+    target.harness === "omp" ||
+    (target.harness === "codex" && target.apiProvider !== "openai")
+  ) {
+    return "harness available; provider authentication deferred to model execution";
+  }
+  return "authenticated";
 }
 
 function unavailableStatus(value: string): ReceiptStatus {
@@ -389,13 +400,18 @@ function unavailableStatus(value: string): ReceiptStatus {
 }
 
 function preflightFailureStatus(
-  provider: Provider,
-  model: string,
+  target: LaneTarget,
   value: string
 ): ReceiptStatus {
   const status = unavailableStatus(value);
   if (status !== "child-failed") return status;
-  return provider === "grok" && !value.includes(model)
+  if (
+    target.harness === "omp" ||
+    (target.harness === "codex" && target.apiProvider !== "openai")
+  ) {
+    return "child-failed";
+  }
+  return target.harness === "grok" && !value.includes(target.model)
     ? "unavailable-model"
     : "unauthenticated";
 }
@@ -434,45 +450,63 @@ function statusExitCode(status: ReceiptStatus): number {
 }
 
 function modelProof(
-  provider: Provider,
-  requested: string,
-  reported: string | null
+  target: LaneTarget,
+  reportedModel: string | null,
+  reportedApiProvider: string | null
 ): {
+  readonly reportedApiProvider: string | null;
   readonly reportedModel: string | null;
   readonly modelVerified: boolean;
   readonly modelEvidence: "provider-report" | "pinned-argv" | null;
+  readonly apiProviderEvidence:
+    | "adapter-fixed"
+    | "pinned-argv"
+    | "provider-report"
+    | null;
 } {
-  if (reportedModelMatches(requested, reported)) {
+  const modelMatches = reportedModelMatches(target.model, reportedModel);
+  const providerMatches =
+    target.harness !== "omp" || reportedApiProvider === target.apiProvider;
+  if (modelMatches && providerMatches) {
     return {
-      reportedModel: reported,
+      reportedApiProvider,
+      reportedModel,
       modelVerified: true,
       modelEvidence: "provider-report",
+      apiProviderEvidence:
+        target.harness === "omp"
+          ? "provider-report"
+          : target.harness === "codex"
+            ? "pinned-argv"
+            : "adapter-fixed",
     };
   }
-  if (provider === "codex" && reported === null) {
+  if (target.harness === "codex" && reportedModel === null) {
     return {
+      reportedApiProvider,
       reportedModel: null,
       modelVerified: false,
       modelEvidence: "pinned-argv",
+      apiProviderEvidence: "pinned-argv",
     };
   }
   return {
-    reportedModel: reported,
+    reportedApiProvider,
+    reportedModel,
     modelVerified: false,
     modelEvidence: null,
+    apiProviderEvidence: null,
   };
 }
 
 function completeReceipt(
   options: RunnerOptions,
-  partial: Omit<RunnerReceipt, "schemaVersion" | "parent" | "provider" | "model" | "effort" | "mode" | "cwd" | "promptPath" | "outputPath">
+  partial: Omit<RunnerReceipt, "schemaVersion" | "parentHarness" | "target" | "mode" | "cwd" | "promptPath" | "outputPath">
 ): RunnerReceipt {
   return {
-    schemaVersion: 1,
-    parent: options.parent,
-    provider: options.provider,
-    model: options.model,
-    effort: options.effort,
+    schemaVersion: 3,
+    parentHarness: options.parentHarness,
+    target: options.target,
     mode: options.mode,
     cwd: options.cwd,
     promptPath: options.promptPath,
@@ -482,12 +516,9 @@ function completeReceipt(
 }
 
 export function validateOptions(options: RunnerOptions): void {
-  if (options.parent === options.provider) {
-    throw new UsageError(
-      `provider ${options.provider} is native to parent ${options.parent}; use the parent subagent primitive`
-    );
+  if (options.target.model.trim().length === 0) {
+    throw new UsageError("model must not be empty");
   }
-  if (options.model.trim().length === 0) throw new UsageError("model must not be empty");
   if (
     options.timeoutMs !== null &&
     (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0)
@@ -525,7 +556,7 @@ async function executeLane(
 ): Promise<RunResult> {
   const startedAt = new Date(started).toISOString();
   const prompt = readFileSync(options.promptPath, "utf8");
-  const env = childEnvironment(options.provider);
+  const env = childEnvironment();
   const executable = Bun.which(invocation.command, {
     PATH: env.PATH,
     cwd: options.cwd,
@@ -555,9 +586,11 @@ async function executeLane(
       argv: [executable ?? invocation.command, ...invocation.args],
       exitCode: null,
       signal: null,
+      reportedApiProvider: null,
       reportedModel: null,
       modelVerified: false,
       modelEvidence: null,
+      apiProviderEvidence: null,
       sessionId: null,
       usage: null,
       costUsd: null,
@@ -592,9 +625,11 @@ async function executeLane(
       argv: [invocation.command, ...invocation.args],
       exitCode: null,
       signal: null,
+      reportedApiProvider: null,
       reportedModel: null,
       modelVerified: false,
       modelEvidence: null,
+      apiProviderEvidence: null,
       sessionId: null,
       usage: null,
       costUsd: null,
@@ -619,17 +654,17 @@ async function executeLane(
     cancellation
   );
   let rawPreflightEvidence = evidence(`${preflightResult.stdout}\n${preflightResult.stderr}`);
-  let passed = preflightPassed(options.provider, options.model, preflightResult);
+  let passed = preflightPassed(options.target, preflightResult);
   let preflightEvidence = passed
-    ? successfulPreflightEvidence(options.provider, options.model)
+    ? successfulPreflightEvidence(options.target)
     : rawPreflightEvidence;
 
   if (
-    options.provider === "grok" &&
+    options.target.harness === "grok" &&
     !passed &&
     preflightResult.cancelledBy === null &&
     !preflightResult.timedOut &&
-    preflightFailureStatus(options.provider, options.model, rawPreflightEvidence) ===
+    preflightFailureStatus(options.target, rawPreflightEvidence) ===
       "unauthenticated"
   ) {
     preflightState = {
@@ -663,11 +698,11 @@ async function executeLane(
       cancellation
     );
     rawPreflightEvidence = evidence(`${preflightResult.stdout}\n${preflightResult.stderr}`);
-    passed = preflightPassed(options.provider, options.model, preflightResult);
+    passed = preflightPassed(options.target, preflightResult);
     preflightEvidence = retriedPreflightEvidence(
       firstPreflightEvidence,
       passed
-        ? successfulPreflightEvidence(options.provider, options.model)
+        ? successfulPreflightEvidence(options.target)
         : rawPreflightEvidence,
       passed
     );
@@ -689,8 +724,7 @@ async function executeLane(
   if (preflightState.status !== "passed") {
     const completed = Date.now();
     const preflightFailure = preflightFailureStatus(
-      options.provider,
-      options.model,
+      options.target,
       rawPreflightEvidence
     );
     const status: ReceiptStatus = preflightResult.cancelledBy !== null
@@ -708,9 +742,11 @@ async function executeLane(
       argv: [executable, ...invocation.args],
       exitCode: preflightResult.exitCode,
       signal: preflightResult.signal,
+      reportedApiProvider: null,
       reportedModel: null,
       modelVerified: false,
       modelEvidence: null,
+      apiProviderEvidence: null,
       sessionId: null,
       usage: null,
       costUsd: null,
@@ -767,9 +803,11 @@ async function executeLane(
     receipt = completeReceipt(options, {
       ...base,
       status,
+      reportedApiProvider: null,
       reportedModel: null,
       modelVerified: false,
       modelEvidence: null,
+      apiProviderEvidence: null,
       sessionId: null,
       usage: null,
       costUsd: null,
@@ -790,20 +828,20 @@ async function executeLane(
   }
 
   try {
-    const parsed = parseProviderOutput(
-      options.provider,
+    const parsed = parseHarnessOutput(
+      options.target.harness,
       result.stdout,
       result.stderr,
-      options.model
+      options.target.model
     );
     const proof = modelProof(
-      options.provider,
-      options.model,
-      parsed.reportedModel
+      options.target,
+      parsed.reportedModel,
+      parsed.reportedApiProvider
     );
     if (!proof.modelVerified && proof.modelEvidence !== "pinned-argv") {
       throw new Error(
-        `requested model ${options.model} was not reported by ${options.provider}`
+        `requested route ${options.target.apiProvider}/${options.target.model} was not reported by ${options.target.harness}`
       );
     }
     writeFileSync(options.outputPath, parsed.text, { encoding: "utf8", mode: 0o600 });
@@ -822,9 +860,11 @@ async function executeLane(
     receipt = completeReceipt(options, {
       ...base,
       status: "malformed-output",
+      reportedApiProvider: null,
       reportedModel: null,
       modelVerified: false,
       modelEvidence: null,
+      apiProviderEvidence: null,
       sessionId: null,
       usage: null,
       costUsd: null,
@@ -846,7 +886,7 @@ export async function runLane(
   validateOptions(options);
   const deadlineAt = options.timeoutMs === null ? null : started + options.timeoutMs;
   const invocation = invocationCommand(options);
-  const preflight = preflightCommand(options.provider);
+  const preflight = preflightCommand(options.target);
   const progress: LaneProgress = {
     executable: null,
     preflight: {
@@ -891,9 +931,11 @@ export async function runLane(
         argv: progress.argv,
         exitCode: null,
         signal: null,
+        reportedApiProvider: null,
         reportedModel: null,
         modelVerified: false,
         modelEvidence: null,
+        apiProviderEvidence: null,
         sessionId: null,
         usage: null,
         costUsd: null,

@@ -1,6 +1,6 @@
 ---
 name: pstack-fable-low
-description: Native Claude lane for pstack roles configured as claude:claude-fable-5@low.
+description: Native Claude lane for pstack roles configured as claude[anthropic]:claude-fable-5@low.
 model: claude-fable-5
 effort: low
 background: true

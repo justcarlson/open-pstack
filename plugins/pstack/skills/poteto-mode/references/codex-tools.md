@@ -1,6 +1,6 @@
 # Codex tool mapping for pstack
 
-pstack skills retain Claude Code tool language (`Skill`, `Agent`, `AskUserQuestion`) in shared prose. On Codex the files are the same; only those tool names resolve differently. Model execution is not translated here. Read [`provider-dispatch.md`](provider-dispatch.md) for the parent-owned Claude/Codex/Grok route table and provider-qualified descriptors.
+pstack skills retain Claude Code tool language (`Skill`, `Agent`, `AskUserQuestion`) in shared prose. On Codex the files are the same; only those tool names resolve differently. Model execution is not translated here. Read [`provider-dispatch.md`](provider-dispatch.md) for the parent-owned route table and harness-and-provider descriptors.
 
 ## Tool actions
 
@@ -39,9 +39,9 @@ poteto-mode's Subagents section sets Claude-specific defaults (`subagent_type: "
 - Claude Code runs every subagent on this machine, so the **swarm** skill's workers and the fan-out playbooks (`orchestrate`, `autopilot-full`, `autopilot-stack`) isolate writers with worktrees. The same holds on Codex.
 - Keep the rest of the policy unchanged. Pass file pointers not inlined context, give each worker its own worktree or branch when they write, review every subagent's diff yourself.
 
-## Models and providers
+## Models and API providers
 
-Do not replace every configured entry with a Codex model. `/setup-pstack` writes portable descriptors such as `claude:claude-fable-5@max`, `codex:gpt-5.6-sol@max`, and `grok:grok-4.6@xhigh`. In a Codex parent, only `codex:*` is native. Route Claude and Grok descriptors through the external launcher exactly as `provider-dispatch.md` specifies. The current default panel intentionally keeps four-provider frontier diversity and contains no older GPT or Claude substitute.
+Do not replace every configured entry with a Codex model. `/setup-pstack` can write Claude, Codex, Grok, and OMP routes. Use native `spawn_agent` only when the current Codex parent can prove the requested API provider, model, and effort. Route every other target through the external launcher. In particular, `codex[openrouter]:...` pins `model_provider`, while `omp[openrouter]:z-ai/glm-5.3-flash@high` runs through headless OMP and verifies its reported provider and model.
 
 ## Claude built-in skills pstack references
 
@@ -56,7 +56,7 @@ Some triggers name skills that ship with Claude Code, not pstack. They do not ex
 
 ## Vendored scripts
 
-`skills/poteto-mode/scripts/` ships the `watch-pr` PR watcher, the `orch` store CLI, `worktree-audit.sh`, and `runner/pstack-runner`. They are plain bun and bash, so they run the same on Codex; invoke them through `shell`. The external runner additionally needs the assigned `claude`, `codex`, or `grok` executable already authenticated. It rejects a Codex provider when Codex is the parent because that lane belongs on native `spawn_agent`. The other scripts need `bun`, `gh`, (for stack work) `gt`, and (for `worktree-audit.sh`) `jq` and `rg`. `worktree-audit.sh` reads Claude Code transcripts under `~/.claude/projects/`; point it at your runtime's transcript directory instead when you run it elsewhere.
+`skills/poteto-mode/scripts/` ships the `watch-pr` PR watcher, the `orch` store CLI, `worktree-audit.sh`, and `runner/pstack-runner`. They are plain Bun and Bash programs, so they run the same on Codex. The runner needs the selected `claude`, `codex`, `grok`, or `omp` executable. A same-harness route can run externally when the native primitive cannot pin the requested target. The other scripts need `bun`, `gh`, `gt` for stack work, and `jq` and `rg` for `worktree-audit.sh`. That audit reads Claude Code transcripts under `~/.claude/projects/`; use your runtime's transcript directory elsewhere.
 
 ## Instructions file
 
