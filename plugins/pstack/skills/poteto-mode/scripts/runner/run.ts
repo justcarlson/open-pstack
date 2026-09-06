@@ -9,7 +9,9 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { randomUUID } from "node:crypto";
 import { invocationCommand, preflightCommand, type CommandSpec } from "./commands.ts";
+import { openScopedGateway, type GatewayBinding } from "./gateway.ts";
 import { parseHarnessOutput, reportedModelMatches } from "./parse-output.ts";
 import type {
   LaneTarget,
@@ -134,10 +136,29 @@ const HARNESS_IDENTITY = [
 ] as const;
 
 export function childEnvironment(
-  source: NodeJS.ProcessEnv = process.env
+  source: NodeJS.ProcessEnv = process.env,
+  target?: LaneTarget,
+  gateway: GatewayBinding | null = null
 ): NodeJS.ProcessEnv {
-  const result = { ...source };
+  const paidEnvironmentKeys = new Set([
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TZ", "TMPDIR", "TMP", "TEMP",
+    "CODEX_HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME",
+  ]);
+  const result = gateway === null
+    ? { ...source }
+    : Object.fromEntries(Object.entries(source).filter(([key]) => paidEnvironmentKeys.has(key) || key.startsWith("LC_")));
   for (const key of HARNESS_IDENTITY) delete result[key];
+  if (target?.harness === "codex") {
+    delete result.OPENAI_API_KEY;
+    delete result.OPENROUTER_API_KEY;
+    delete result.PSTACK_GATEWAY_TOKEN;
+  }
+  if (gateway !== null) {
+    result.PSTACK_GATEWAY_TOKEN = gateway.token;
+    for (const key of ["CODEX_HOME", "XDG_DATA_HOME"]) {
+      if (source[key]?.trim()) result[key] = resolve(source[key]);
+    }
+  }
   return result;
 }
 
@@ -225,7 +246,7 @@ async function runProcess(
   const child = Bun.spawn([executable, ...spec.args], {
     cwd,
     env,
-    stdin: spec.stdin === "prompt" ? "pipe" : "ignore",
+    stdin: spec.stdin === "prompt" ? new Blob([prompt]) : "ignore",
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -255,13 +276,6 @@ async function runProcess(
       arm();
     });
   try {
-    if (spec.stdin === "prompt") {
-      const stdin = child.stdin;
-      if (stdin === undefined) throw new Error("child stdin pipe was not created");
-      stdin.write(prompt);
-      stdin.end();
-    }
-
     const completions = [exited, cancelled];
     if (deadline !== null) completions.push(deadline);
     const first = await Promise.race(completions);
@@ -367,7 +381,7 @@ function preflightPassed(target: LaneTarget, result: ProcessResult): boolean {
     }
     case "codex":
       return target.apiProvider === "openai"
-        ? /logged in/i.test(combined)
+        ? combined.split(/\r?\n/).some((line) => line.trim() === "Logged in using ChatGPT")
         : true;
     case "omp":
       return true;
@@ -377,6 +391,9 @@ function preflightPassed(target: LaneTarget, result: ProcessResult): boolean {
 }
 
 function successfulPreflightEvidence(target: LaneTarget): string {
+  if (target.harness === "codex" && target.apiProvider === "openai") {
+    return "authenticated with ChatGPT";
+  }
   if (target.harness === "grok") {
     return `authenticated; model ${target.model} available`;
   }
@@ -501,10 +518,11 @@ function modelProof(
 
 function completeReceipt(
   options: RunnerOptions,
-  partial: Omit<RunnerReceipt, "schemaVersion" | "parentHarness" | "target" | "mode" | "cwd" | "promptPath" | "outputPath">
+  partial: Omit<RunnerReceipt, "schemaVersion" | "parentHarness" | "target" | "mode" | "cwd" | "promptPath" | "outputPath" | "paid">
 ): RunnerReceipt {
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
+    paid: null,
     parentHarness: options.parentHarness,
     target: options.target,
     mode: options.mode,
@@ -518,6 +536,14 @@ function completeReceipt(
 export function validateOptions(options: RunnerOptions): void {
   if (options.target.model.trim().length === 0) {
     throw new UsageError("model must not be empty");
+  }
+  if (options.target.harness === "codex" && options.target.apiProvider === "openrouter") {
+    if (options.target.model !== "z-ai/glm-5.3-flash" || options.target.effort !== "max") {
+      throw new UsageError("OpenRouter execution permits only z-ai/glm-5.3-flash at max");
+    }
+    if (options.taskId === null || !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$/.test(options.taskId)) {
+      throw new UsageError("OpenRouter execution requires a valid shared task-id");
+    }
   }
   if (
     options.timeoutMs !== null &&
@@ -552,11 +578,11 @@ async function executeLane(
   deadlineAt: number | null,
   invocation: CommandSpec,
   preflight: CommandSpec,
-  progress: LaneProgress
+  progress: LaneProgress,
+  env: NodeJS.ProcessEnv
 ): Promise<RunResult> {
   const startedAt = new Date(started).toISOString();
   const prompt = readFileSync(options.promptPath, "utf8");
-  const env = childEnvironment();
   const executable = Bun.which(invocation.command, {
     PATH: env.PATH,
     cwd: options.cwd,
@@ -885,7 +911,6 @@ export async function runLane(
 ): Promise<RunResult> {
   validateOptions(options);
   const deadlineAt = options.timeoutMs === null ? null : started + options.timeoutMs;
-  const invocation = invocationCommand(options);
   const preflight = preflightCommand(options.target);
   const progress: LaneProgress = {
     executable: null,
@@ -894,20 +919,30 @@ export async function runLane(
       status: "not-run",
       evidence: "",
     },
-    argv: [invocation.command, ...invocation.args],
+    argv: [],
   };
   const cancellation = installRunCancellation();
+  let gateway: Awaited<ReturnType<typeof openScopedGateway>> | null = null;
   try {
     reserveOutputs(options);
+    let result: RunResult;
     try {
-      return await executeLane(
+      if (options.target.harness === "codex" && options.target.apiProvider === "openrouter") {
+        if (options.taskId === null) throw new UsageError("OpenRouter requires a task-id");
+        gateway = await openScopedGateway({ taskId: options.taskId, laneId: randomUUID() });
+      }
+      const binding = gateway?.binding ?? null;
+      const invocation = invocationCommand(options, binding);
+      progress.argv = [invocation.command, ...invocation.args];
+      result = await executeLane(
         options,
         cancellation,
         started,
         deadlineAt,
         invocation,
         preflight,
-        progress
+        progress,
+        childEnvironment(process.env, options.target, binding)
       );
     } catch (error) {
       const completed = Date.now();
@@ -916,9 +951,9 @@ export async function runLane(
         ? "cancelled"
         : deadlineAt !== null && completed >= deadlineAt
           ? "timed-out"
-          : "child-failed";
+          : unavailableStatus(error instanceof Error ? error.message : String(error));
       const message = error instanceof Error ? error.message : String(error);
-      const terminalPreflight = progress.preflight.status === "not-run" && status !== "child-failed"
+      const terminalPreflight = progress.preflight.status === "not-run" && (status === "cancelled" || status === "timed-out")
         ? { ...progress.preflight, status }
         : progress.preflight;
       const receipt = completeReceipt(options, {
@@ -950,9 +985,34 @@ export async function runLane(
       });
       removeIfExists(options.outputPath);
       writeReceipt(options.receiptPath, receipt);
-      return { exitCode: statusExitCode(status), receipt };
+      result = { exitCode: statusExitCode(status), receipt };
     }
+    if (gateway !== null) {
+      const paid = await gateway.close();
+      gateway = null;
+      const failure = paid.failure ?? (paid.requestCount === 0
+        ? "paid worker completed without a gateway request"
+        : paid.heldUsd > 0 ? "paid request cost remains unknown; reservation retained" : null);
+      const status = result.receipt.status === "complete" && failure !== null
+        ? "child-failed"
+        : result.receipt.status;
+      const completed = Date.now();
+      const receipt: RunnerReceipt = {
+        ...result.receipt,
+        status,
+        completedAt: new Date(completed).toISOString(),
+        elapsedMs: completed - started,
+        paid,
+        costUsd: paid.heldUsd === 0 ? paid.chargedUsd : null,
+        error: result.receipt.error ?? (failure === null ? null : { message: failure, evidence: "See paid gateway evidence and retained reservations." }),
+      };
+      if (status !== "complete") removeIfExists(options.outputPath);
+      writeReceipt(options.receiptPath, receipt);
+      result = { exitCode: statusExitCode(status), receipt };
+    }
+    return result;
   } finally {
+    if (gateway !== null) await gateway.close();
     cancellation.dispose();
   }
 }

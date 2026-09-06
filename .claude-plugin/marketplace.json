@@ -1,19 +1,19 @@
 {
   "name": "open-pstack",
   "owner": {
-    "name": "Eric Litman"
+    "name": "justcarlson"
   },
-  "description": "Pstack for Claude Code, Codex, and OMP, tracking Cursor's upstream pstack.",
+  "description": "Subscription-first pstack for Codex and OpenCode2, tracking Cursor upstream.",
   "plugins": [
     {
       "name": "pstack",
       "source": "./plugins/pstack",
       "description": "if you want to go fast, go deep first. pstack helps you write less, but higher quality code. rigorous agent workflows you can parallelize with confidence.",
-      "version": "1.3.0",
+      "version": "1.4.0",
       "author": {
         "name": "Lauren Tan (original)"
       },
-      "homepage": "https://github.com/ericlitman/open-pstack",
+      "homepage": "https://github.com/justcarlson/open-pstack",
       "license": "MIT",
       "keywords": [
         "pstack",

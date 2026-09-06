@@ -1,6 +1,8 @@
 # CHANGES — applied substitutions
 
-This port applies the Cursor → Claude Code substitutions in skill bodies. Earlier drafts left them flagged; this revision resolves them. A later pass added a Codex build that shares the same skills; see [Codex port](#codex-port) below.
+## 1.4.0 — Codex and OpenCode 2
+
+Adds an idempotent installer for both harnesses, namespaced OpenCode skill views, and explicit pstack entry profiles. The default role map uses ChatGPT subscription access first: Sol high, Astra high/xhigh, and Luna max. GLM 5.3 Flash max is available as an OpenRouter overflow worker through a per-request gateway with shared monthly and task budgets. Schema-4 receipts include paid-route evidence. Native non-OpenAI agent files are removed; the public runner accepts only the documented OpenAI and bounded GLM routes.
 
 ## 1.3.0 makes routes configurable and adds OMP
 

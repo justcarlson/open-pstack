@@ -10,7 +10,7 @@ open-pstack tracks [Cursor's pstack](https://github.com/cursor/plugins/tree/main
 | Path | `pstack/` |
 | Commit | `bdf7aa355337897f167153e05069aca505dae17c` |
 | Upstream version | `0.14.3` |
-| open-pstack version | `1.3.0` |
+| open-pstack version | `1.4.0` |
 
 The table above is the current Cursor sync point. Open Pstack 1.3.0 keeps the 0.14.3 upstream sync and adds configurable cross-harness model routes. `README-UPSTREAM.md` preserves its pstack README verbatim. `CHANGES.md` and `NOTICE.md` describe the adaptations and provenance.
 
@@ -38,7 +38,11 @@ No output means the tracked pstack tree has not changed. This comparison does no
 2. Read each upstream pstack commit in order. Bring over its intent and content, then apply only the Claude Code and Codex substitutions documented in `CHANGES.md`.
 3. Keep one shared `plugins/pstack/skills/` tree. Put harness translation in the existing `codex-tools.md` and provider routing in `provider-dispatch.md`; do not fork a skill per harness.
 4. Update the commit and version in this file, the affected provenance rows in `NOTICE.md`, and `README-UPSTREAM.md` when upstream changes it.
-5. Run CI-equivalent checks locally, then run the installed Claude Code and Codex behavioral lanes required by the changed surface. Unit tests alone are not a release gate.
+5. Run CI-equivalent checks locally, then run the installed Codex and OpenCode 2 behavioral lanes required by the changed surface. Unit tests alone are not a release gate.
 6. Merge the reviewed PR before tagging the next open-pstack release.
 
 Cursor's version and open-pstack's version are independent. Cursor's version identifies the imported content; open-pstack's version identifies the cross-harness distribution.
+
+## Fork routing policy
+
+Version 1.4.0 adds Codex and OpenCode 2 installation with a subscription-first model sheet and bounded GLM overflow workers. Native non-OpenAI model agents are removed. Explicit routes use the documented Codex worker launcher. The upstream synchronization point is unchanged.

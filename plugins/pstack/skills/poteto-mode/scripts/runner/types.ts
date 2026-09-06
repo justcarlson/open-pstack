@@ -1,4 +1,6 @@
-export const PARENT_HARNESSES = ["claude", "codex", "omp"] as const;
+import type { PaidRouteEvidence } from "./gateway.ts";
+
+export const PARENT_HARNESSES = ["claude", "codex", "omp", "opencode2"] as const;
 export const EXECUTION_HARNESSES = ["claude", "codex", "grok", "omp"] as const;
 export const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 export const ACCESS_MODES = ["read-only", "isolated-write"] as const;
@@ -43,6 +45,7 @@ export interface RunnerOptions {
   readonly outputPath: string;
   readonly receiptPath: string;
   readonly timeoutMs: number | null;
+  readonly taskId: string | null;
 }
 
 export type ReceiptStatus =
@@ -74,7 +77,7 @@ export interface ParsedOutput {
 }
 
 export interface RunnerReceipt {
-  readonly schemaVersion: 3;
+  readonly schemaVersion: 4;
   readonly status: ReceiptStatus;
   readonly parentHarness: ParentHarness;
   readonly target: LaneTarget;
@@ -106,6 +109,7 @@ export interface RunnerReceipt {
   readonly sessionId: string | null;
   readonly usage: NormalizedUsage | null;
   readonly costUsd: number | null;
+  readonly paid: PaidRouteEvidence | null;
   readonly error: {
     readonly message: string;
     readonly evidence: string;

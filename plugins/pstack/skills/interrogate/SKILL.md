@@ -9,7 +9,7 @@ Spawn one reviewer per configured model to adversarially review code changes. Ea
 
 The deliverable is a synthesized verdict. Do NOT auto-apply changes.
 
-**Dispatch contract.** Read [`provider-dispatch.md`](../poteto-mode/references/provider-dispatch.md) before launching reviewers. Configured entries are harness-and-provider route descriptors; the parent starts native and external read-only lanes directly. On Codex, resolve remaining Claude tool names via [`codex-tools.md`](../poteto-mode/references/codex-tools.md).
+**Dispatch contract.** Read [`provider-dispatch.md`](../poteto-mode/references/provider-dispatch.md) before launching reviewers. Configured entries are harness-and-provider route descriptors; the parent starts native and external read-only lanes directly. On Codex, use [`codex-tools.md`](../poteto-mode/references/codex-tools.md); on OpenCode 2, use [`opencode-tools.md`](../poteto-mode/references/opencode-tools.md).
 
 ## Step 1, Determine Scope
 
@@ -38,12 +38,10 @@ Start all reviewers in one fan-out phase. Use `interrogate reviewers` from the c
 
 | Subagent | Default model |
 |----------|---------------|
-| Reviewer A | `claude[anthropic]:claude-fable-5@max` |
-| Reviewer B | `codex[openai]:gpt-5.6-sol@max` |
-| Reviewer C | `grok[xai]:grok-4.6@xhigh` |
-| Reviewer D | `claude[anthropic]:claude-opus-5@xhigh` |
+| Reviewer A | `codex[openai]:gpt-5.6-sol@high` |
+| Reviewer B | `codex[openai]:gpt-6-astra@high` |
 
-For each reviewer, route the configured descriptor with `read-only` access and a unique output/receipt path. If the descriptor is `inherit-parent` or `auto`, use the parent subagent primitive without a model override. If a provider, login, or model is unavailable, record a dropout and continue with the completed reviewers. Never pick the closest model or silently fall back; that destroys the meaning of cross-provider agreement.
+For each reviewer, route the configured descriptor with `read-only` access and a unique output/receipt path. If the descriptor is `inherit-parent` or `auto`, verify that the parent uses OpenAI before using its subagent primitive without a model override. Otherwise record a dropout. If a provider, login, or model is unavailable, record a dropout and continue with the completed reviewers. Never pick the closest model or silently fall back; that invalidates agreement among the requested models.
 
 Read `references/reviewer-prompt.md` and fill in the template with:
 1. The stated intent

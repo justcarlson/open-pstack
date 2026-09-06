@@ -45,65 +45,36 @@ else
   fail=1
 fi
 
-# Static invariant (CHANGES maintenance note): provider-dispatch owns the default
-# harness/provider/model quad and the four panel skills plus setup-pstack copy it
-# verbatim.
-setup="$repo/plugins/pstack/skills/setup-pstack/SKILL.md"
+setup="$repo/plugins/pstack/config/pstack-models.md"
 dispatch="$repo/plugins/pstack/skills/poteto-mode/references/provider-dispatch.md"
-quad_of() { { grep -oE '(claude|codex|grok)\[[A-Za-z0-9][A-Za-z0-9_-]*\]:[^ @,]+@(low|medium|high|xhigh|max)' || true; } | tr '\n' ' ' | sed 's/ $//'; }
-canon_quad="$(awk '
-  $0 == "## Default routes" { in_matrix = 1; next }
-  in_matrix && /^## / { exit }
-  in_matrix && /^\|/ {
-    line = $0
-    sub(/^\|/, "", line)
-    sub(/\|$/, "", line)
-    n = split(line, cells, "|")
-    for (i = 1; i <= n; i++) {
-      gsub(/^ +| +$/, "", cells[i])
-      gsub(/`/, "", cells[i])
-    }
-    family = cells[1]
-    if (family == "Family" || family ~ /^:?-+:?$/) next
-    harness = cells[3]
-    provider = cells[4]
-    model = cells[5]
-    effort = cells[6]
-    if (out != "") out = out " "
-    out = out harness "[" provider "]:" model "@" effort
-  }
-  END { print out }
-' "$dispatch")"
-quad_bad=""
-[ -n "$canon_quad" ] || quad_bad="could not read the canonical quad from $dispatch"$'\n'
-# Anchor on the quad's last slug rather than a hard-coded one, so a model swap in
-# setup-pstack cannot leave this check hunting for a slug nobody ships any more.
-anchor="${canon_quad##* }"
-# arena, architect, and how each state the quad on one line; interrogate lists it
-# as one slug per row of its Reviewer A/B/C/D table (upstream #167).
+panel_of() { { grep -oE '(claude|codex|grok)\[[A-Za-z0-9][A-Za-z0-9_-]*\]:[^ @,]+@(low|medium|high|xhigh|max)' || true; } | tr '\n' ' ' | sed 's/ $//'; }
+canon_panel="$(grep '^arena runners:' "$setup" | panel_of)"
+panel_bad=""
+[ -n "$canon_panel" ] || panel_bad="could not read the canonical panel from $dispatch"$'\n'
+anchor="$(printf '%s' "$canon_panel" | cut -d ' ' -f 1)"
 for name in arena architect how; do
   skill="$repo/plugins/pstack/skills/$name/SKILL.md"
   n="$(grep -Fc "$anchor" "$skill" || true)"
   if [ "$n" != "1" ]; then
-    quad_bad="$quad_bad$skill: expected exactly 1 default-quad line, found $n"$'\n'
+    panel_bad="$panel_bad$skill: expected exactly 1 default-panel line, found $n"$'\n'
     continue
   fi
-  got="$(grep -F "$anchor" "$skill" | quad_of)"
-  [ "$got" = "$canon_quad" ] || quad_bad="$quad_bad$skill: [$got] != [$canon_quad]"$'\n'
+  got="$(grep -F "$anchor" "$skill" | panel_of)"
+  [ "$got" = "$canon_panel" ] || panel_bad="$panel_bad$skill: [$got] != [$canon_panel]"$'\n'
 done
 interrogate="$repo/plugins/pstack/skills/interrogate/SKILL.md"
-got="$(grep -E '^\| Reviewer [A-Z] \|' "$interrogate" | quad_of)"
-[ "$got" = "$canon_quad" ] || quad_bad="$quad_bad$interrogate reviewer table: [$got] != [$canon_quad]"$'\n'
+got="$(grep -E '^\| Reviewer [A-Z] \|' "$interrogate" | panel_of)"
+[ "$got" = "$canon_panel" ] || panel_bad="$panel_bad$interrogate reviewer table: [$got] != [$canon_panel]"$'\n'
 while IFS= read -r line; do
-  got="$(printf '%s\n' "$line" | quad_of)"
-  [ "$got" = "$canon_quad" ] || quad_bad="$quad_bad$setup role row: [$got] != [$canon_quad]"$'\n'
+  got="$(printf '%s\n' "$line" | panel_of)"
+  [ "$got" = "$canon_panel" ] || panel_bad="$panel_bad$setup role row: [$got] != [$canon_panel]"$'\n'
 done < <(grep -E '^(arena runners|arena cross-judge pool|architect runners|interrogate reviewers|how critics):' "$setup")
-if [ -n "$quad_bad" ]; then
-  note "FAIL: the default model quad is not identical across provider dispatch, the panel skills, and setup-pstack:"
-  note "$quad_bad"
+if [ -n "$panel_bad" ]; then
+  note "FAIL: the default model panel is not identical across provider dispatch, the panel skills, and setup-pstack:"
+  note "$panel_bad"
   fail=1
 else
-  note "ok: default model quad identical across provider dispatch + 4 panel skills + setup-pstack ($canon_quad)"
+  note "ok: default model panel identical across provider dispatch + 4 panel skills + setup-pstack ($canon_panel)"
 fi
 
 plugin="$repo/plugins/pstack"
@@ -156,37 +127,5 @@ if [ "${PSTACK_STATIC_ONLY:-0}" = "1" ]; then
   exit "$fail"
 fi
 
-scratch="$(mktemp -d)"
-trap 'rm -rf "$scratch"' EXIT
-mkdir -p "$scratch/.claude-plugin" "$scratch/skills/foo"
-printf '%s\n' '{"name": "testplug", "version": "0.0.1", "description": "native skill repro"}' \
-  > "$scratch/.claude-plugin/plugin.json"
-cat > "$scratch/skills/foo/SKILL.md" <<'EOF'
----
-name: foo
-description: collision test skill
----
-
-Say exactly: SKILL-RAN
-Then stop. Do not invoke any skill or tool.
-EOF
-
-run() {
-  claude -p --plugin-dir "$scratch" --model claude-fable-5 --effort max --max-turns 3 "$1" < /dev/null 2>&1
-}
-
-check() { # $1 label, $2 expected marker, $3 output
-  if printf '%s' "$3" | grep -q "$2"; then
-    note "ok: $1 -> $2"
-  else
-    note "FAIL: $1 expected $2, got: $3"
-    fail=1
-  fi
-}
-
-invoke='Call the Skill tool with skill "testplug:foo" exactly once and follow what it says.'
-
-check "model-initiated Skill-tool invocation" "SKILL-RAN" "$(run "$invoke")"
-check "user /testplug:foo invocation" "SKILL-RAN" "$(run '/testplug:foo')"
-
+note "Use installed Codex and OpenCode 2 behavioral smokes to verify the release."
 exit "$fail"

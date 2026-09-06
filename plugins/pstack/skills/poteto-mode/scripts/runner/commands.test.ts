@@ -1,5 +1,10 @@
 import { describe, expect, it } from "bun:test";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { invocationCommand, preflightCommand } from "./commands.ts";
+import { openScopedGateway } from "./gateway.ts";
+import { childEnvironment } from "./run.ts";
 import type { LaneTarget, RunnerOptions } from "./types.ts";
 
 function options(
@@ -20,6 +25,7 @@ function options(
     outputPath: "/tmp/output.md",
     receiptPath: "/tmp/receipt.json",
     timeoutMs: null,
+    taskId: null,
     ...overrides,
   };
 }
@@ -28,7 +34,7 @@ describe("preflightCommand", () => {
   it("uses Codex login for OpenAI and defers custom-provider auth", () => {
     expect(preflightCommand(options().target)).toEqual({
       command: "codex",
-      args: ["login", "status"],
+      args: ["login", "status", "--config", 'forced_login_method="chatgpt"'],
       stdin: "none",
     });
     expect(
@@ -68,10 +74,17 @@ describe("invocationCommand", () => {
     expect(spec.stdin).toBe("prompt");
     expect(spec.args).toEqual([
       "exec",
+      "--ignore-user-config",
+      "--config",
+      'web_search="disabled"',
       "--model",
       "gpt-5.6-sol",
       "--config",
       'model_provider="openai"',
+      "--config",
+      'forced_login_method="chatgpt"',
+      "--config",
+      'service_tier="default"',
       "--config",
       'model_reasoning_effort="max"',
       "--sandbox",
@@ -80,6 +93,8 @@ describe("invocationCommand", () => {
       "/tmp/worktree",
       "--skip-git-repo-check",
       "--ephemeral",
+      "--disable",
+      "apps",
       "--disable",
       "plugins",
       "--disable",
@@ -99,21 +114,60 @@ describe("invocationCommand", () => {
       options({
         harness: "codex",
         apiProvider: "openrouter",
-        model: "anthropic/claude-sonnet-4.5",
-        effort: "high",
-      })
+        model: "z-ai/glm-5.3-flash",
+        effort: "max",
+      }),
+      { baseUrl: "http://127.0.0.1:12345/v1", token: "scoped-test-token", protectedPaths: ["/tmp/credentials", "/proc"] }
     );
     expect(spec.args).toEqual(
       expect.arrayContaining([
         "--model",
-        "anthropic/claude-sonnet-4.5",
+        "z-ai/glm-5.3-flash",
         "--config",
-        'model_provider="openrouter"',
+        'model_provider="pstack_openrouter"',
         "--config",
-        'model_reasoning_effort="high"',
+        'model_reasoning_effort="max"',
       ])
     );
     expect(spec.args).not.toContain("--config model_provider=\"openrouter\"");
+    expect(spec.args.join(" ")).not.toContain("scoped-test-token");
+    expect(spec.args).not.toContain("--sandbox");
+    expect(spec.args).toContain('approval_policy="never"');
+    expect(spec.args).toContain('model_providers.pstack_openrouter.env_key="PSTACK_GATEWAY_TOKEN"');
+    expect(spec.args).toContain('model_providers.pstack_openrouter.base_url="http://127.0.0.1:12345/v1"');
+  });
+
+  it.skipIf(process.platform !== "linux" || Bun.which("codex") === null)("denies paid tools credential and ledger access in the real sandbox", async () => {
+    const scratch = mkdtempSync(join(tmpdir(), "pstack-paid-access-"));
+    const workspace = join(scratch, "workspace");
+    const credentialDirectory = join(scratch, "credentials");
+    const ledgerDirectory = join(scratch, "ledger");
+    const credential = join(credentialDirectory, "auth.json");
+    const ledger = join(ledgerDirectory, "budget.sqlite3");
+    mkdirSync(workspace);
+    mkdirSync(credentialDirectory);
+    mkdirSync(ledgerDirectory);
+    writeFileSync(credential, "fake credential sentinel");
+    const dataHome = join(scratch, "data");
+    const openCodeAuth = join(dataHome, "opencode", "auth.json");
+    mkdirSync(join(dataHome, "opencode"), {recursive: true});
+    writeFileSync(openCodeAuth, "fake OpenCode credential sentinel");
+    const gateway = await openScopedGateway({taskId: "test", laneId: "test", ledgerPath: ledger, env: {OPENROUTER_API_KEY: "fake", CODEX_HOME: credentialDirectory, XDG_DATA_HOME: dataHome}});
+    await gateway.close();
+    const ledgerBefore = readFileSync(ledger);
+    try {
+      const spec = invocationCommand(options({harness: "codex", apiProvider: "openrouter", model: "z-ai/glm-5.3-flash", effort: "max"}, {cwd: workspace, mode: "isolated-write"}), gateway.binding);
+      const policy = spec.args.find((arg) => arg.startsWith("permissions.pstack_paid="));
+      expect(policy).toBeDefined();
+      const child = Bun.spawn(["codex", "sandbox", "-C", workspace, "-c", policy!, "-P", "pstack_paid", "--", "/bin/sh", "-c",
+        'test ! -r "$1" && test ! -r "$2" && test ! -e "/proc/$3/environ" && test ! -r "$4" && test -z "$OTHER_API_KEY$PRIVATE_VALUE" && printf verified > proof.txt',
+        "paid-boundary", credential, ledger, String(process.pid), openCodeAuth], {stdout: "pipe", stderr: "pipe", env: childEnvironment({...process.env, OTHER_API_KEY: "fake-secret", PRIVATE_VALUE: "fake-private"}, {harness: "codex", apiProvider: "openrouter", model: "z-ai/glm-5.3-flash", effort: "max"}, gateway.binding)});
+      const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text(), new Response(child.stdout).text()]);
+      expect(stderr).toBe("");
+      expect(exitCode).toBe(0);
+      expect(readFileSync(join(workspace, "proof.txt"), "utf8")).toBe("verified");
+      expect(readFileSync(ledger)).toEqual(ledgerBefore);
+    } finally { rmSync(scratch, {recursive: true, force: true}); }
   });
 
   it("pins an OMP provider, model, effort, tools, and no-fallback overlay", () => {
