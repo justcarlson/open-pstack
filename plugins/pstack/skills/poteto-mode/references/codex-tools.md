@@ -41,7 +41,7 @@ poteto-mode's Subagents section sets Claude-specific defaults (`subagent_type: "
 
 ## Models and API providers
 
-Do not replace every configured entry with a Codex model. `/setup-pstack` can write Claude, Codex, Grok, and OMP routes. Use native `spawn_agent` only when the current Codex parent can prove the requested API provider, model, and effort. Route every other target through the external launcher. In particular, `codex[openrouter]:...` pins `model_provider`, while `omp[openrouter]:z-ai/glm-5.3-flash@high` runs through headless OMP and verifies its reported provider and model.
+This installation permits only `codex[openai]:<gpt-model>@<effort>` routes. Use native `spawn_agent` only when the parent can pin the exact OpenAI model and effort. Otherwise use the Codex external launcher. `inherit-parent` and `auto` require an OpenAI parent. Follow the provider-dispatch policy for unavailable routes.
 
 ## Claude built-in skills pstack references
 
@@ -56,7 +56,7 @@ Some triggers name skills that ship with Claude Code, not pstack. They do not ex
 
 ## Vendored scripts
 
-`skills/poteto-mode/scripts/` ships the `watch-pr` PR watcher, the `orch` store CLI, `worktree-audit.sh`, and `runner/pstack-runner`. They are plain Bun and Bash programs, so they run the same on Codex. The runner needs the selected `claude`, `codex`, `grok`, or `omp` executable. A same-harness route can run externally when the native primitive cannot pin the requested target. The other scripts need `bun`, `gh`, `gt` for stack work, and `jq` and `rg` for `worktree-audit.sh`. That audit reads Claude Code transcripts under `~/.claude/projects/`; use your runtime's transcript directory elsewhere.
+`skills/poteto-mode/scripts/` ships the `watch-pr` PR watcher, the `orch` store CLI, `worktree-audit.sh`, and `runner/pstack-runner`. They are plain Bun and Bash programs, so they run the same on Codex. The runner needs the `codex` executable. A same-harness route can run externally when the native primitive cannot pin the requested target. The other scripts need `bun`, `gh`, `gt` for stack work, and `jq` and `rg` for `worktree-audit.sh`. That audit reads Claude Code transcripts under `~/.claude/projects/`; use your runtime's transcript directory elsewhere.
 
 ## Instructions file
 

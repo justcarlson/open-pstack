@@ -24,6 +24,7 @@ import type {
 let scratch = "";
 let bin = "";
 let previousPath: string | undefined;
+const installedCodex = Bun.which("codex");
 
 const fake = `#!/usr/bin/env bun
 import { appendFileSync, existsSync, unlinkSync, writeFileSync } from "node:fs";
@@ -75,8 +76,14 @@ if (name === "claude" && args[0] === "auth") {
   process.exit(0);
 }
 if (name === "codex" && args[0] === "login") {
-  console.log("Logged in using ChatGPT");
+  if (process.env.FAKE_REMOVE_EXECUTABLE_AFTER_PREFLIGHT === "1") {
+    unlinkSync(process.argv[1]);
+  }
+  console.log(process.env.FAKE_CODEX_AUTH ?? "Logged in using ChatGPT");
   process.exit(0);
+}
+if (stage === "model" && process.env.FAKE_STDIN_PATH) {
+  writeFileSync(process.env.FAKE_STDIN_PATH, await Bun.stdin.text());
 }
 if (name === "omp" && args[0] === "--version") {
   console.log("omp 0.0-test");
@@ -212,6 +219,7 @@ function options(
     outputPath: join(scratch, `${suffix}.out`),
     receiptPath: join(scratch, `${suffix}.receipt.json`),
     timeoutMs: null,
+    taskId: null,
   };
 }
 
@@ -283,6 +291,7 @@ beforeEach(() => {
   for (const name of ["claude", "codex", "grok", "omp"]) makeExecutable(name);
   previousPath = process.env.PATH;
   process.env.PATH = `${bin}:${dirname(process.execPath)}:${previousPath ?? ""}`;
+  delete process.env.FAKE_CODEX_AUTH;
   delete process.env.FAKE_TIMEOUT;
   delete process.env.FAKE_INVALID_MODEL;
   delete process.env.FAKE_CANCEL;
@@ -305,11 +314,13 @@ beforeEach(() => {
   delete process.env.FAKE_SELF_SIGNAL;
   delete process.env.FAKE_OMP_FALLBACK;
   delete process.env.FAKE_REQUIRE_OPENROUTER_KEY;
+  delete process.env.FAKE_STDIN_PATH;
   delete process.env.OPENROUTER_API_KEY;
 });
 
 afterEach(() => {
   process.env.PATH = previousPath;
+  delete process.env.FAKE_CODEX_AUTH;
   delete process.env.FAKE_TIMEOUT;
   delete process.env.FAKE_INVALID_MODEL;
   delete process.env.FAKE_CANCEL;
@@ -332,6 +343,7 @@ afterEach(() => {
   delete process.env.FAKE_SELF_SIGNAL;
   delete process.env.FAKE_OMP_FALLBACK;
   delete process.env.FAKE_REQUIRE_OPENROUTER_KEY;
+  delete process.env.FAKE_STDIN_PATH;
   delete process.env.OPENROUTER_API_KEY;
   rmSync(scratch, { recursive: true, force: true });
 });
@@ -346,7 +358,7 @@ describe("runLane", () => {
         harness.toUpperCase()
       );
       expect(receipt(input.receiptPath)).toMatchObject({
-        schemaVersion: 3,
+        schemaVersion: 4,
         status: "complete",
         target: input.target,
         reportedApiProvider:
@@ -371,7 +383,7 @@ describe("runLane", () => {
     expect(result.exitCode).toBe(65);
     expect(existsSync(input.outputPath)).toBe(false);
     expect(receipt(input.receiptPath)).toMatchObject({
-      schemaVersion: 3,
+      schemaVersion: 4,
       status: "malformed-output",
       reportedApiProvider: null,
       modelEvidence: null,
@@ -398,6 +410,47 @@ describe("runLane", () => {
       apiProviderEvidence: "pinned-argv",
     });
   });
+
+  it.skipIf(installedCodex === null)(
+    "feeds the prompt to a worker from inside a Codex workspace sandbox",
+    async () => {
+      const stdinPath = join(scratch, "nested-worker.stdin");
+      process.env.FAKE_STDIN_PATH = stdinPath;
+      const input: RunnerOptions = {
+        ...options("codex", "nested-parent"),
+        parentHarness: "codex",
+        mode: "isolated-write",
+      };
+      const runner = Bun.spawn([
+        installedCodex!,
+        "sandbox",
+        "-P",
+        ":workspace",
+        "-C",
+        scratch,
+        "--",
+        ...runnerArgs(input),
+      ], {
+        env: process.env,
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const stdout = new Response(runner.stdout).text();
+      const stderr = new Response(runner.stderr).text();
+      const result = {
+        exitCode: await runner.exited,
+        stdout: await stdout,
+        stderr: await stderr,
+      };
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(JSON.parse(result.stdout)).toMatchObject({ status: "complete" });
+      expect(readFileSync(stdinPath, "utf8")).toBe("Return the marker.");
+      expect(receipt(input.receiptPath)).toMatchObject({ status: "complete" });
+    }
+  );
 
   it("classifies an unavailable model without falling back", async () => {
     process.env.FAKE_INVALID_MODEL = "1";
@@ -489,7 +542,12 @@ describe("runLane", () => {
     const transientMarker = join(scratch, "grok-cancel-unauth.pid");
     const preflightLog = join(scratch, "grok-cancel-unauth.log");
     const input = options("grok", "grok-preflight-retry-cancelled");
-    const runner = Bun.spawn([process.execPath, ...runnerArgs(input)], {
+    const adapterScript = join(scratch, "grok-adapter.ts");
+    writeFileSync(adapterScript, `
+      import { runLane } from ${JSON.stringify(join(import.meta.dir, "run.ts"))};
+      process.exitCode = (await runLane(${JSON.stringify(input)})).exitCode;
+    `);
+    const runner = Bun.spawn([process.execPath, adapterScript], {
       cwd: scratch,
       env: {
         ...process.env,
@@ -547,7 +605,7 @@ describe("runLane", () => {
 
   it("does not spawn the model when preflight exhausts the wrapper deadline", async () => {
     const modelStarted = join(scratch, "deadline-model.started");
-    const input = { ...options("claude", "preflight-deadline"), timeoutMs: 300 };
+    const input = { ...options("codex", "preflight-deadline"), timeoutMs: 300 };
     const runner = Bun.spawn([process.execPath, ...runnerArgs(input)], {
       cwd: scratch,
       env: {
@@ -572,7 +630,7 @@ describe("runLane", () => {
   });
 
   it("lets a delayed wrapper lane finish when timeout is omitted", async () => {
-    const input = options("claude", "unbounded-default");
+    const input = options("codex", "unbounded-default");
     const runner = Bun.spawn([process.execPath, ...runnerArgs(input)], {
       cwd: scratch,
       env: { ...process.env, FAKE_MODEL_DELAY_MS: "400" },
@@ -593,7 +651,7 @@ describe("runLane", () => {
 
   it("keeps a very long explicit deadline without timer overflow", async () => {
     const input = {
-      ...options("claude", "long-runtime-deadline"),
+      ...options("codex", "long-runtime-deadline"),
       timeoutMs: 2_147_483_648,
     };
     const runner = Bun.spawn([process.execPath, ...runnerArgs(input)], {
@@ -619,7 +677,7 @@ describe("runLane", () => {
     const modelStarted = join(scratch, "expired-model.started");
     process.env.FAKE_PREFLIGHT_STARTED_PATH = preflightStarted;
     process.env.FAKE_MODEL_STARTED_PATH = modelStarted;
-    const input = { ...options("claude", "expired-at-entry"), timeoutMs: 100 };
+    const input = { ...options("codex", "expired-at-entry"), timeoutMs: 100 };
     const stdout: string[] = [];
     const stderr: string[] = [];
 
@@ -658,7 +716,7 @@ describe("runLane", () => {
 
   it("bounds a descendant-held pipe by the explicit deadline without fabricating a signal", async () => {
     const descendantPidPath = join(scratch, "deadline-descendant.pid");
-    const input = { ...options("claude", "deadline-drain"), timeoutMs: 700 };
+    const input = { ...options("codex", "deadline-drain"), timeoutMs: 700 };
     const runner = Bun.spawn([process.execPath, ...runnerArgs(input)], {
       cwd: scratch,
       env: {
@@ -689,7 +747,7 @@ describe("runLane", () => {
 
   it("does not claim a signal was sent to an already signal-reaped child", async () => {
     const descendantPidPath = join(scratch, "signalled-descendant.pid");
-    const input = { ...options("claude", "signalled-drain"), timeoutMs: 700 };
+    const input = { ...options("codex", "signalled-drain"), timeoutMs: 700 };
     const runner = Bun.spawn([process.execPath, ...runnerArgs(input)], {
       cwd: scratch,
       env: {
@@ -720,7 +778,7 @@ describe("runLane", () => {
   it("lets manual cancellation end a post-exit pipe drain without a default timeout", async () => {
     const descendantPidPath = join(scratch, "cancel-descendant.pid");
     const modelExiting = join(scratch, "cancel-model.exiting");
-    const input = options("claude", "cancel-drain");
+    const input = options("codex", "cancel-drain");
     const runner = Bun.spawn([process.execPath, ...runnerArgs(input)], {
       cwd: scratch,
       env: {
@@ -753,7 +811,7 @@ describe("runLane", () => {
   });
 
   it("clears a losing long-deadline timer when the shipped wrapper succeeds", async () => {
-    const input = { ...options("claude", "long-deadline"), timeoutMs: 60_000 };
+    const input = { ...options("codex", "long-deadline"), timeoutMs: 60_000 };
     const runner = Bun.spawn([process.execPath, ...runnerArgs(input)], {
       cwd: scratch,
       env: { ...process.env },
@@ -769,7 +827,7 @@ describe("runLane", () => {
   });
 
   it("cancels a preflight with SIGINT and writes a terminal receipt", async () => {
-    const input = options("claude", "preflight-cancelled");
+    const input = options("codex", "preflight-cancelled");
     const started = join(scratch, "preflight-child.started");
     const terminated = join(scratch, "preflight-child.terminated");
     const isolatedRunner = join(scratch, "isolated-runner");
@@ -919,7 +977,7 @@ describe("runLane", () => {
   });
 
   it("terminalizes catchable failures after reserving output paths", async () => {
-    const unreadable = options("claude", "unreadable-prompt");
+    const unreadable = options("codex", "unreadable-prompt");
     chmodSync(unreadable.promptPath, 0o000);
     const unreadableRunner = Bun.spawn([process.execPath, ...runnerArgs(unreadable)], {
       cwd: scratch,
@@ -954,7 +1012,7 @@ describe("runLane", () => {
     await Promise.all([sameStdout, sameStderr]);
     expect(readFileSync(unreadable.receiptPath, "utf8")).toBe(preservedReceipt);
 
-    const spawnFailure = options("claude", "spawn-failure");
+    const spawnFailure = options("codex", "spawn-failure");
     const modelStarted = join(scratch, "spawn-failure-model.started");
     const spawnRunner = Bun.spawn([process.execPath, ...runnerArgs(spawnFailure)], {
       cwd: scratch,
@@ -983,30 +1041,22 @@ describe("runLane", () => {
     expect(receipt(retry.receiptPath).status).toBe("complete");
   });
 
-  it("runs a same-harness custom-provider route externally", async () => {
-    process.env.FAKE_REQUIRE_OPENROUTER_KEY = "1";
-    process.env.OPENROUTER_API_KEY = "secret-sentinel";
-    const input: RunnerOptions = {
-      ...options("codex", "openrouter", "openrouter"),
-      parentHarness: "codex",
-    };
-    const result = await runLane(input);
-    expect(result.exitCode).toBe(0);
-    expect(receipt(input.receiptPath)).toMatchObject({
-      status: "complete",
-      parentHarness: "codex",
-      target: {
-        harness: "codex",
-        apiProvider: "openrouter",
-        model: "anthropic/claude-sonnet-4.5",
-        effort: "high",
-      },
-      apiProviderEvidence: "pinned-argv",
-    });
-    expect(readFileSync(input.receiptPath, "utf8")).not.toContain(
-      "secret-sentinel"
-    );
+  it("rejects an unbudgeted custom-provider route before execution", async () => {
+    const input = options("codex", "openrouter", "openrouter");
+    await expect(runLane(input)).rejects.toThrow("OpenRouter execution permits only");
+    expect(existsSync(input.outputPath)).toBe(false);
   });
+
+  it.each(["Not logged in", "Logged in using an API key"])(
+    "rejects successful auth status without subscription login: %s",
+    async (auth) => {
+      process.env.FAKE_CODEX_AUTH = auth;
+      const input = options("codex", "wrong-auth");
+      expect((await runLane(input)).exitCode).not.toBe(0);
+      expect(receipt(input.receiptPath).status).toBe("unauthenticated");
+      expect(existsSync(input.outputPath)).toBe(false);
+    }
+  );
 
   it("runs an explicit OMP target externally under an OMP parent", async () => {
     const input: RunnerOptions = {
@@ -1015,7 +1065,7 @@ describe("runLane", () => {
     };
     expect((await runLane(input)).exitCode).toBe(0);
     expect(receipt(input.receiptPath)).toMatchObject({
-      schemaVersion: 3,
+      schemaVersion: 4,
       status: "complete",
       parentHarness: "omp",
       target: {
@@ -1033,6 +1083,12 @@ describe("runLane", () => {
 });
 
 describe("childEnvironment", () => {
+  it("gives Codex only the scoped gateway credential", () => {
+    const source = { OPENAI_API_KEY: "openai", OPENROUTER_API_KEY: "upstream", PSTACK_GATEWAY_TOKEN: "old", OTHER_API_KEY: "unrelated", PRIVATE_VALUE: "private", PATH: "/bin" };
+    expect(childEnvironment(source, target("codex"))).toEqual({ PATH: "/bin", OTHER_API_KEY: "unrelated", PRIVATE_VALUE: "private" });
+    expect(childEnvironment(source, target("codex"), { baseUrl: "http://127.0.0.1:1/v1", token: "scoped", protectedPaths: [] })).toEqual({ PATH: "/bin", PSTACK_GATEWAY_TOKEN: "scoped" });
+  });
+
   it("removes both harness identities while retaining provider credentials", () => {
     const source = {
       PATH: "/bin",

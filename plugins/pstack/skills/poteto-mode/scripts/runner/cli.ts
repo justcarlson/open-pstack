@@ -14,13 +14,15 @@ import {
   UsageError,
 } from "./types.ts";
 
-const HELP = `Usage: pstack-runner --parent-harness <claude|codex|omp> \\
-  --harness <claude|codex|grok|omp> --api-provider <id> --model <slug> \\
+const HELP = `Usage: pstack-runner --parent-harness <codex|opencode2|claude|omp> \\
+  --harness codex --api-provider <openai|openrouter> --model <slug> \\
   --effort <level> --mode <read-only|isolated-write> --prompt <file> \\
-  --cwd <dir> --output <file> --receipt <file> [--timeout <seconds>]
+  --cwd <dir> --output <file> --receipt <file> [--task-id <scope>] [--timeout <seconds>]
 
-Runs exactly one external model lane. The parent resolves native versus external
-dispatch before invoking this runner. Output and receipt paths must not already
+Runs one ChatGPT-authenticated OpenAI lane or a budgeted OpenRouter
+z-ai/glm-5.3-flash@max lane through Codex. Paid lanes require a stable --task-id
+shared by every worker in the top-level task. The parent resolves
+native versus external dispatch before invoking this runner. Output and receipt paths must not already
 exist. There is no implicit timeout. Pass --timeout only when the user or task
 supplies a real deadline; it is one end-to-end launcher deadline shared by
 setup, preflight, and model execution.
@@ -74,22 +76,14 @@ function laneTarget(
   model: string,
   effort: Effort
 ): LaneTarget {
-  switch (harness) {
-    case "claude":
-      if (provider !== "anthropic") {
-        throw new UsageError("claude harness requires api-provider anthropic");
-      }
-      return { harness, apiProvider: provider, model, effort };
-    case "codex":
-      return { harness, apiProvider: provider, model, effort };
-    case "omp":
-      return { harness, apiProvider: provider, model, effort };
-    case "grok":
-      if (provider !== "xai") {
-        throw new UsageError("grok harness requires api-provider xai");
-      }
-      return { harness, apiProvider: provider, model, effort };
+  const chatgpt = provider === "openai" && /^gpt-[A-Za-z0-9][A-Za-z0-9._-]*$/.test(model);
+  const flash = provider === "openrouter" && model === "z-ai/glm-5.3-flash" && effort === "max";
+  if (harness !== "codex" || (!chatgpt && !flash)) {
+    throw new UsageError(
+      "external lanes require Codex with an OpenAI GPT model or openrouter/z-ai/glm-5.3-flash at max"
+    );
   }
+  return { harness, apiProvider: provider, model, effort };
 }
 
 export function parseArgs(argv: readonly string[]): RunnerOptions | null {
@@ -111,6 +105,7 @@ export function parseArgs(argv: readonly string[]): RunnerOptions | null {
         output: { type: "string" },
         receipt: { type: "string" },
         timeout: { type: "string" },
+        "task-id": { type: "string" },
         help: { type: "boolean", short: "h", default: false },
       },
     });
@@ -142,6 +137,13 @@ export function parseArgs(argv: readonly string[]): RunnerOptions | null {
     required("model", stringValue(parsed.values.model)),
     oneOf("effort", stringValue(parsed.values.effort), EFFORTS) as Effort
   );
+  const taskId = stringValue(parsed.values["task-id"]) ?? null;
+  if (target.apiProvider === "openrouter" && taskId === null) {
+    throw new UsageError("OpenRouter lanes require --task-id for the shared task budget");
+  }
+  if (taskId !== null && !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$/.test(taskId)) {
+    throw new UsageError("task-id must be 1-160 letters, digits, dots, underscores, colons, slashes, or hyphens");
+  }
   return resolvedOptions({
     parentHarness: oneOf(
       "parent-harness",
@@ -155,6 +157,7 @@ export function parseArgs(argv: readonly string[]): RunnerOptions | null {
     outputPath: required("output", stringValue(parsed.values.output)),
     receiptPath: required("receipt", stringValue(parsed.values.receipt)),
     timeoutMs: timeoutSeconds === null ? null : timeoutSeconds * 1_000,
+    taskId,
   });
 }
 

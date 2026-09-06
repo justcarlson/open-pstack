@@ -1,4 +1,6 @@
 import { join } from "node:path";
+import type { GatewayBinding } from "./gateway.ts";
+import { UsageError } from "./types.ts";
 import type {
   AccessMode,
   Effort,
@@ -26,7 +28,7 @@ export function preflightCommand(target: LaneTarget): CommandSpec {
       return target.apiProvider === "openai"
         ? {
             command: "codex",
-            args: ["login", "status"],
+            args: ["login", "status", "--config", 'forced_login_method="chatgpt"'],
             stdin: "none",
           }
         : {
@@ -80,8 +82,25 @@ function effortOverride(effort: Effort): string {
   return `model_reasoning_effort=${JSON.stringify(effort)}`;
 }
 
-export function invocationCommand(options: RunnerOptions): CommandSpec {
+function codexAccess(options: RunnerOptions, gateway: GatewayBinding | null): string[] {
+  if (gateway === null) return ["--sandbox", codexSandbox(options.mode)];
+  const base = options.mode === "read-only" ? ":read-only" : ":workspace";
+  const denied = gateway.protectedPaths.map((path) => `${JSON.stringify(path)}="deny"`).join(",");
+  return [
+    "--config", 'approval_policy="never"',
+    "--config", 'default_permissions="pstack_paid"',
+    "--config", `permissions.pstack_paid={extends=${JSON.stringify(base)},filesystem={${denied}},network={enabled=false}}`,
+  ];
+}
+
+export function invocationCommand(
+  options: RunnerOptions,
+  gateway: GatewayBinding | null = null
+): CommandSpec {
   const target = options.target;
+  if (target.harness === "codex" && target.apiProvider === "openrouter" && gateway === null) {
+    throw new UsageError("OpenRouter execution requires the budget gateway");
+  }
   switch (target.harness) {
     case "claude":
       return {
@@ -113,18 +132,38 @@ export function invocationCommand(options: RunnerOptions): CommandSpec {
         command: "codex",
         args: [
           "exec",
+          "--ignore-user-config",
+          "--config",
+          'web_search="disabled"',
           "--model",
           target.model,
           "--config",
-          `model_provider=${JSON.stringify(target.apiProvider)}`,
+          `model_provider=${JSON.stringify(gateway === null ? target.apiProvider : "pstack_openrouter")}`,
+          ...(gateway === null
+            ? target.apiProvider === "openai"
+              ? ["--config", 'forced_login_method="chatgpt"']
+              : []
+            : [
+                "--config", 'model_providers.pstack_openrouter.name="Pstack OpenRouter"',
+                "--config", `model_providers.pstack_openrouter.base_url=${JSON.stringify(gateway.baseUrl)}`,
+                "--config", 'model_providers.pstack_openrouter.env_key="PSTACK_GATEWAY_TOKEN"',
+                "--config", 'model_providers.pstack_openrouter.wire_api="responses"',
+                "--config", "model_providers.pstack_openrouter.requires_openai_auth=false",
+                "--config", "model_providers.pstack_openrouter.supports_websockets=false",
+                "--config", "model_providers.pstack_openrouter.request_max_retries=1",
+                "--config", "model_providers.pstack_openrouter.stream_max_retries=0",
+              ]),
+          "--config",
+          'service_tier="default"',
           "--config",
           effortOverride(target.effort),
-          "--sandbox",
-          codexSandbox(options.mode),
+          ...codexAccess(options, gateway),
           "--cd",
           options.cwd,
           "--skip-git-repo-check",
           "--ephemeral",
+          "--disable",
+          "apps",
           "--disable",
           "plugins",
           "--disable",

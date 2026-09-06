@@ -1,0 +1,11 @@
+# Start the economical parent with: codex -p pstack
+model = "gpt-5.6-sol"
+model_reasoning_effort = "high"
+service_tier = "default"
+forced_login_method = "chatgpt"
+
+[features]
+multi_agent = true
+
+[agents]
+max_concurrent_threads_per_session = 2
